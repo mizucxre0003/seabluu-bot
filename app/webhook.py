@@ -1,23 +1,48 @@
 # app/webhook.py
 import logging
+import asyncio
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 
 from .config import BOT_TOKEN
-from .main import register_handlers  # все хендлеры регистрируем одной функцией
+from .main import register_handlers
+from . import sheets
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Создаём PTB-приложение один раз (без сетевых вызовов на старте)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 register_handlers(application)
 
 app = FastAPI()
+_bg_task = None
+
+async def _bg_loop():
+    """Фоновая рассылка по подпискам: ловим ручные правки в Google Sheets."""
+    await application.initialize()  # чтобы был bot
+    logger.info("Background loop started")
+    while True:
+        try:
+            to_send = sheets.scan_updates()
+            for item in to_send:
+                try:
+                    await application.bot.send_message(
+                        chat_id=int(item["user_id"]),
+                        text=f"Обновление по заказу *{item['order_id']}*\nНовый статус: *{item['new_status']}*",
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    logger.warning("Send fail: %s", e)
+        except Exception as e:
+            logger.exception("scan_updates error: %s", e)
+        await asyncio.sleep(120)  # каждые 2 минуты
 
 @app.on_event("startup")
 async def on_startup():
+    global _bg_task
+    if _bg_task is None:
+        _bg_task = asyncio.create_task(_bg_loop())
     logger.info("FastAPI started. Waiting for Telegram updates...")
 
 @app.on_event("shutdown")
@@ -29,7 +54,7 @@ async def on_shutdown():
 
 @app.post("/telegram")
 async def telegram_webhook(req: Request):
-    """Входящий webhook от Telegram с ленивой инициализацией PTB."""
+    """Входящий webhook от Telegram."""
     try:
         data = await req.json()
 
