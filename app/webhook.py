@@ -10,10 +10,9 @@ from telegram.ext import Application, ApplicationBuilder
 
 from .main import register_handlers
 try:
-    # опционально: если есть админ-UI
     from .main import register_admin_ui
 except Exception:
-    register_admin_ui = None  # не валимся, если функции нет
+    register_admin_ui = None  # безопасно, если функции нет
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -23,7 +22,7 @@ application: Application | None = None
 
 
 def _get_bot_token() -> str:
-    # 1) пробуем из config.py
+    # 1) из config.py
     try:
         from .config import BOT_TOKEN as _TOK  # type: ignore
         if _TOK:
@@ -38,7 +37,7 @@ def _get_bot_token() -> str:
 
 
 def _get_public_url() -> str:
-    # 1) пробуем из config.py
+    # 1) из config.py
     try:
         from .config import PUBLIC_URL as _URL  # type: ignore
         if _URL:
@@ -50,6 +49,7 @@ def _get_public_url() -> str:
 
 
 async def _build_application() -> Application:
+    """Создаёт Application, регистрирует хэндлеры, настраивает вебхук (без инициализации)."""
     bot_token = _get_bot_token()
     public_url = _get_public_url()
 
@@ -77,23 +77,54 @@ async def _build_application() -> Application:
     return app_
 
 
-@app.on_event("startup")
-async def on_startup():
-    global application
-    application = await _build_application()
-    logger.info("Startup complete.")
-
-
-@app.post("/telegram")
-async def telegram(request: Request):
+async def _ensure_ready():
+    """Гарантирует, что Application создано, initialize()/start() вызваны."""
     global application
     if application is None:
         application = await _build_application()
 
+    # initialize + start обязательны в PTB v21 при внешнем фреймворке
+    try:
+        await application.initialize()
+    except Exception:
+        # если уже инициализировано — ок
+        pass
+    try:
+        await application.start()
+    except Exception:
+        # если уже запущено — ок
+        pass
+
+
+@app.on_event("startup")
+async def on_startup():
+    global application
+    application = await _build_application()
+    # ВАЖНО: инициализация и старт
+    await application.initialize()
+    await application.start()
+    logger.info("Startup complete: application initialized & started.")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    # Корректное завершение
+    if application is not None:
+        try:
+            await application.stop()
+        finally:
+            await application.shutdown()
+    logger.info("Shutdown complete.")
+
+
+@app.post("/telegram")
+async def telegram(request: Request):
+    await _ensure_ready()
+
     data = await request.json()
     try:
         update = Update.de_json(data, application.bot)
-        # лёгкая диагностика
+        # диагностика
         try:
             utype = (
                 "message" if getattr(update, "message", None) else
