@@ -10,8 +10,12 @@ from telegram.ext import (
 )
 
 from .config import BOT_TOKEN
-from .main import start, help_cmd, handle_text, on_callback
-from app.main import admin_menu, on_admin_callback  # если ещё не добавлено
+from .main import register_handlers
+
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+register_handlers(application)
+
+from app.main import admin_menu, on_admin_callback
 from .main import register_handlers
 register_handlers(application)
 
