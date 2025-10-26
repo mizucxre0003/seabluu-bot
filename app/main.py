@@ -85,7 +85,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Мои подписки — список подписок\n"
         "• /admin — админ-панель (для админов)\n"
         "• /adminoff — выйти из админ-режима\n"
-        "• В админ-режиме можно прислать @username или список @username — я пришлю адрес(а)."
+        "• В админ-режиме можно прислать @username или список @username — пришлю адрес(а)."
     )
 
 async def admin_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,7 +177,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Пришли @username или несколько через пробел/запятую/новую строку.")
                 return
             rows = sheets.get_addresses_by_usernames(usernames)
-            # собираем быстрый словарь user -> запись
             by_user = {str(r.get("username","")).lower(): r for r in rows}
             reply = []
             for u in usernames:
@@ -197,7 +196,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("adm_mode", None)
             return
 
-        # 4) «Умный» быстрый запрос — если админ прислал сообщение с @user вне режима
+        # 4) Быстрый запрос адресов по @username вне режима
         if USERNAME_RE.search(raw) and not mode:
             usernames = [m.group(1) for m in USERNAME_RE.finditer(raw)]
             rows = sheets.get_addresses_by_usernames(usernames)
@@ -219,7 +218,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n\n".join(reply))
             return
 
-        # неизвестный админ-режим
         if mode:
             await update.message.reply_text("Жду действие в админ-режиме.", reply_markup=admin_kb())
             return
@@ -406,6 +404,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data
+
+    # ===== ОБРАБОТЧИКИ КНОПОК АДРЕСОВ (ДОБАВИТЬ/УДАЛИТЬ) =====
+    if data == "addr:add":
+        # запустить мастер добавления/обновления адреса
+        context.user_data["mode"] = "add_address_fullname"
+        await q.message.reply_text("Давайте добавим/обновим адрес.\nФИО:")
+        return
+
+    if data == "addr:del":
+        ok = sheets.delete_address(update.effective_user.id)
+        if ok:
+            await q.message.reply_text("Адрес удалён ✅")
+        else:
+            await q.message.reply_text("Удалять нечего — адрес не найден.")
+        return
+    # =========================================================
 
     if data == "adm:back":
         context.user_data.pop("adm_mode", None)
