@@ -1,0 +1,8 @@
+python-telegram-bot[job-queue]==21.4
+gspread==6.1.2
+google-auth==2.34.0
+pandas==2.3.3
+python-dotenv==1.0.1
+cachetools==5.3.3
+fastapi==0.115.5 
+uvicorn==0.30.6 
