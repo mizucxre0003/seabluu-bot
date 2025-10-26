@@ -46,10 +46,22 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# детектор номера заказа (KR-12345, CN12345, SB-999 и т.п.)
-ORDER_ID_RE = re.compile(r"^[A-ZА-Я]{1,3}-?\d{3,}$", re.IGNORECASE)
-def looks_like_order_id(s: str) -> bool:
-    return bool(ORDER_ID_RE.match((s or "").strip()))
+# ====== помощники для order_id и валидности статуса ======
+# Поймаем KR-12345 / KR12345 / KR 12345 / KR-12345 — CN
+ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—]?\s?(\d{3,})", re.IGNORECASE)
+
+def extract_order_id(s: str) -> str | None:
+    if not s:
+        return None
+    m = ORDER_ID_RE.search(s.strip())
+    if not m:
+        return None
+    prefix = m.group(1).upper()
+    num = m.group(2)
+    return f"{prefix}-{num}"
+
+def is_valid_status(s: str, statuses: list[str]) -> bool:
+    return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
 
 # ========= БАЗОВЫЕ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =========
 
@@ -101,13 +113,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["adm_mode"] = "add_order_status"
             buttons = [[InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}")] for s in STATUSES[:6]]
             await update.message.reply_text(
-                "Выбери стартовый статус кнопкой ниже или напиши свой:",
+                "Выбери стартовый статус кнопкой ниже или напиши точный текст статуса:",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 
         if mode == "add_order_status":
-            context.user_data["adm_buf"]["status"] = raw
+            # Строгая проверка: разрешаем только из STATUSES
+            if not is_valid_status(raw, STATUSES):
+                buttons = [[InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}")] for s in STATUSES[:6]]
+                await update.message.reply_text(
+                    "Пожалуйста, выбери статус кнопкой ниже (или напиши точный текст статуса из списка):",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                return
+            context.user_data["adm_buf"]["status"] = raw.strip()
             context.user_data["adm_mode"] = "add_order_note"
             await update.message.reply_text("Примечание (или '-' если нет):")
             return
@@ -116,7 +136,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf = context.user_data.get("adm_buf", {})
             buf["note"] = raw if raw != "-" else ""
             try:
-                # address_id не используем: кладём пустую строку, если столбец есть
+                # address_id не используем
                 sheets.add_order({
                     "order_id": buf["order_id"],
                     "client_name": buf.get("client_name", ""),
@@ -135,12 +155,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("adm_buf", None)
             return
 
-        # Смена статуса: примем order_id даже без явного режима, если текст похож на order_id
-        if mode == "upd_order_id" or (mode is None and looks_like_order_id(raw)):
-            context.user_data.setdefault("adm_buf", {})["order_id"] = raw
+        # Смена статуса: примем order_id даже без явного режима — извлечём из строки
+        parsed_id = extract_order_id(raw)
+        if mode == "upd_order_id" or (mode is None and parsed_id):
+            if not parsed_id:
+                await update.message.reply_text("Пришли номер заказа, например: KR-12345")
+                return
+            context.user_data.setdefault("adm_buf", {})["order_id"] = parsed_id
             context.user_data["adm_mode"] = "upd_pick_status"
             buttons = [[InlineKeyboardButton(s, callback_data=f"adm:set_status:{s}")] for s in STATUSES]
-            await update.message.reply_text("Выбери новый статус:", reply_markup=InlineKeyboardMarkup(buttons))
+            await update.message.reply_text(
+                f"Заказ *{parsed_id}*. Выбери новый статус:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode="Markdown",
+            )
             return
 
         if mode == "find_order":
@@ -167,7 +195,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "отследить заказ":
         context.user_data["mode"] = "track"
-        await update.message.reply_text("Отправьте номер заказа (например: SB-12345):")
+        await update.message.reply_text("Отправьте номер заказа (например: CN-12345):")
         return
 
     if text == "мои адреса":
@@ -354,7 +382,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id in ADMIN_IDS:
             context.user_data["adm_mode"] = "add_order_id"
             context.user_data["adm_buf"] = {}
-            await q.message.reply_text("Введи *order_id* (например: SB-12345):", parse_mode="Markdown")
+            await q.message.reply_text("Введи *order_id* (например: CN-12345):", parse_mode="Markdown")
         return
 
     if data == "adm:update":
