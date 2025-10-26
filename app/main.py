@@ -491,7 +491,8 @@ async def broadcast_all_unpaid(update, context):
 
 def register_admin_ui(application):
     from telegram.ext import CommandHandler, MessageHandler, filters
-    application.add_handler(CommandHandler("admin", cmd_admin))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_admin_text))
+    # group=-10 so admin router runs BEFORE generic text handlers
+    application.add_handler(CommandHandler("admin", cmd_admin), group=-10)
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_admin_text), group=-10)
 
 
