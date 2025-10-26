@@ -1,4 +1,5 @@
 # app/webhook.py
+import os
 import logging
 
 from fastapi import FastAPI, Request
@@ -9,9 +10,10 @@ from telegram.ext import Application, ApplicationBuilder
 
 from .main import register_handlers
 try:
+    # опционально: если есть админ-UI
     from .main import register_admin_ui
 except Exception:
-    register_admin_ui = None  # безопасно, чтобы деплой не падал
+    register_admin_ui = None  # не валимся, если функции нет
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -20,14 +22,43 @@ app = FastAPI()
 application: Application | None = None
 
 
+def _get_bot_token() -> str:
+    # 1) пробуем из config.py
+    try:
+        from .config import BOT_TOKEN as _TOK  # type: ignore
+        if _TOK:
+            return _TOK
+    except Exception:
+        pass
+    # 2) из окружения
+    env_tok = os.getenv("BOT_TOKEN", "")
+    if not env_tok:
+        raise RuntimeError("BOT_TOKEN is not set (neither in app.config nor in environment)")
+    return env_tok
+
+
+def _get_public_url() -> str:
+    # 1) пробуем из config.py
+    try:
+        from .config import PUBLIC_URL as _URL  # type: ignore
+        if _URL:
+            return _URL
+    except Exception:
+        pass
+    # 2) из окружения
+    return os.getenv("PUBLIC_URL", "")
+
+
 async def _build_application() -> Application:
-    from .config import BOT_TOKEN, PUBLIC_URL
-    app_ = ApplicationBuilder().token(BOT_TOKEN).build()
+    bot_token = _get_bot_token()
+    public_url = _get_public_url()
+
+    app_ = ApplicationBuilder().token(bot_token).build()
 
     # базовые хэндлеры
     register_handlers(app_)
 
-    # админ-UI
+    # админ-UI (если есть)
     if register_admin_ui:
         try:
             register_admin_ui(app_)
@@ -36,11 +67,12 @@ async def _build_application() -> Application:
             logger.warning("Admin UI not registered: %s", e)
 
     # вебхук
-    if PUBLIC_URL:
-        await app_.bot.set_webhook(f"{PUBLIC_URL.rstrip('/')}/telegram")
-        logger.info("Webhook set to %s/telegram", PUBLIC_URL.rstrip('/'))
+    if public_url:
+        url = f"{public_url.rstrip('/')}/telegram"
+        await app_.bot.set_webhook(url)
+        logger.info("Webhook set to %s", url)
     else:
-        logger.info("PUBLIC_URL is empty; running without setWebhook")
+        logger.warning("PUBLIC_URL is empty or missing; skipping setWebhook")
 
     return app_
 
@@ -61,7 +93,7 @@ async def telegram(request: Request):
     data = await request.json()
     try:
         update = Update.de_json(data, application.bot)
-        # диагностика
+        # лёгкая диагностика
         try:
             utype = (
                 "message" if getattr(update, "message", None) else
