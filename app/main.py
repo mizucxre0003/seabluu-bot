@@ -68,6 +68,9 @@ def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
+def _is_admin(uid) -> bool:
+    return uid in ADMIN_IDS or str(uid) in {str(x) for x in ADMIN_IDS}
+
 # ---------------------- Клиентская клавиатура ----------------------
 
 MAIN_KB = ReplyKeyboardMarkup(
@@ -85,6 +88,7 @@ ADMIN_MENU_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Добавить разбор"), KeyboardButton("Отследить разбор")],
         [KeyboardButton("Админ: Рассылка"), KeyboardButton("Админ: Адреса")],
+        [KeyboardButton("Выйти из админ-панели")],
     ],
     resize_keyboard=True,
 )
@@ -106,6 +110,7 @@ ADMIN_TEXT_KEYS = {
     "уведомления по id разбора",
     "назад, в админ-панель",
     "админ: адреса",
+    "выйти из админ-панели",
 }
 
 # ---------------------- Команды ----------------------
@@ -126,10 +131,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
+    if not _is_admin(update.effective_user.id):
         return
-    context.user_data.pop("adm_mode", None)
-    context.user_data.pop("adm_buf", None)
+    # сбрасываем любые незавершённые админ-потоки
+    for k in ("adm_mode", "adm_buf", "awaiting_unpaid_order_id"):
+        context.user_data.pop(k, None)
     await (update.message or update.callback_query.message).reply_text(
         "Админ-панель:", reply_markup=ADMIN_MENU_KB
     )
@@ -141,8 +147,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = raw.lower()
 
     # ===== ADMIN FLOW (кнопки снизу) =====
-    if update.effective_user.id in ADMIN_IDS:
+    if _is_admin(update.effective_user.id):
         # маршрутизация по админ-кнопкам
+        if text == "выйти из админ-панели":
+            # вернуть клиентскую клавиатуру и очистить состояние
+            context.user_data.clear()
+            await update.message.reply_text("Ок, вышли из админ-панели.", reply_markup=MAIN_KB)
+            return
+
         if text == "добавить разбор":
             context.user_data["adm_mode"] = "add_order_id"
             context.user_data["adm_buf"] = {}
@@ -162,6 +174,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if text == "уведомления по id разбора":
+            context.user_data["awaiting_unpaid_order_id"] = True
             context.user_data["adm_mode"] = "adm_remind_unpaid_order"
             await update.message.reply_text("Введи *order_id* для рассылки неплательщикам:", parse_mode="Markdown")
             return
@@ -177,7 +190,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
             return
 
-        # ----- ветки мастеров/режимов из старого кода -----
+        # ----- ветки мастеров/режимов -----
         a_mode = context.user_data.get("adm_mode")
 
         # Добавление заказа
@@ -232,7 +245,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "note": buf.get("note", ""),
                     }
                 )
-                # 2) синхронизируем участников разбора из client_name -> participants
+                # 2) синхронизируем участников из client_name -> participants
                 usernames = [m.group(1) for m in USERNAME_RE.finditer(buf.get("client_name", ""))]
                 if usernames:
                     sheets.ensure_participants(buf["order_id"], usernames)
@@ -242,8 +255,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 await update.message.reply_text(f"Ошибка: {e}")
             finally:
-                context.user_data.pop("adm_mode", None)
-                context.user_data.pop("adm_buf", None)
+                for k in ("adm_mode", "adm_buf"):
+                    context.user_data.pop(k, None)
             return
 
         # Поиск полной карточки заказа
@@ -305,15 +318,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("adm_mode", None)
             return
 
-        # Ручная рассылка по одному order_id (ID вводится текстом)
-        if a_mode == "adm_remind_unpaid_order":
+        # Ручная рассылка по одному order_id
+        if a_mode == "adm_remind_unpaid_order" and context.user_data.get("awaiting_unpaid_order_id"):
             parsed_id = extract_order_id(raw) or raw
             ok = await remind_unpaid_for_order(context.application, parsed_id)
             if ok:
                 await update.message.reply_text(f"Рассылка по заказу *{parsed_id}* отправлена ✅", parse_mode="Markdown")
             else:
                 await update.message.reply_text("Либо заказ не найден, либо нет получателей.")
-            context.user_data.pop("adm_mode", None)
+            for k in ("adm_mode", "awaiting_unpaid_order_id"):
+                context.user_data.pop(k, None)
             return
 
     # ===== USER FLOW =====
@@ -443,7 +457,7 @@ async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         address=context.user_data.get("address", ""),
         postcode=context.user_data.get("postcode", ""),
     )
-    # автоподписка: где клиент есть в participants
+    # автоподписка по username
     try:
         username = (u.username or "").strip()
         if username:
@@ -489,7 +503,7 @@ async def remind_unpaid_for_order(application, order_id: str) -> bool:
     unpaid_usernames = sheets.get_unpaid_usernames(order_id)
     if not unpaid_usernames:
         return False
-    user_ids = sheets.get_user_ids_by_usernames(unpaid_usernames)
+    user_ids = sheets.get_user_ids_by_usernames([u.lower() for u in unpaid_usernames])
     if not user_ids:
         return False
     sent = 0
@@ -514,7 +528,6 @@ async def remind_unpaid_for_order(application, order_id: str) -> bool:
     return sent > 0
 
 async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Кнопка в админ-клавиатуре — сводка по всем должникам."""
     grouped = sheets.get_all_unpaid_grouped()
     total_orders = len(grouped)
     total_ok = 0
@@ -544,7 +557,7 @@ async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAUL
     ])
     await context.bot.send_message(chat_id=update.effective_chat.id, text=summary)
 
-# ---------- CallbackQuery (нужно для старого мастера, статусов и адресов) ----------
+# ---------- CallbackQuery ----------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -606,12 +619,12 @@ def register_handlers(application):
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CallbackQueryHandler(on_callback))
-    # общий текст
+    # ВАЖНО: только один текстовый хэндлер, чтобы не было дублей
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
 def register_admin_ui(application):
     """
-    Доп. роутер не нужен: мы перехватываем админские кнопки в handle_text в самом начале.
-    Если хочется жёстко дать приоритет — можно продублировать:
+    Ничего не регистрируем, чтобы не дублировать handle_text.
+    Вебхук спокойно может вызывать эту функцию — она no-op.
     """
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text), group=-10)
+    return
