@@ -168,12 +168,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             context.user_data["adm_buf"]["country"] = country
             context.user_data["adm_mode"] = "add_order_status"
-            await update.message.reply_text("Выбери стартовый статус кнопкой ниже или напиши точный:", reply_markup=status_keyboard(2))
+            await update.message.reply_text(
+                "Выбери стартовый статус кнопкой ниже или напиши точный:",
+                reply_markup=status_keyboard(2),
+            )
             return
 
         if a_mode == "add_order_status":
             if not is_valid_status(raw, STATUSES):
-                await update.message.reply_text("Выбери статус кнопкой ниже или напиши точный:", reply_markup=status_keyboard(2))
+                await update.message.reply_text(
+                    "Выбери статус кнопкой ниже или напиши точный:",
+                    reply_markup=status_keyboard(2),
+                )
                 return
             context.user_data["adm_buf"]["status"] = raw.strip()
             context.user_data["adm_mode"] = "add_order_note"
@@ -221,6 +227,39 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for i, s in enumerate(STATUSES)
             ]
             await update.message.reply_text("Выберите статус:", reply_markup=InlineKeyboardMarkup(rows))
+            return
+
+        # --- Поиск и вывод полной карточки заказа ---
+        if a_mode == "find_order":
+            parsed_id = extract_order_id(raw) or raw
+            order = sheets.get_order(parsed_id)
+            if not order:
+                await update.message.reply_text("Заказ не найден.")
+                context.user_data.pop("adm_mode", None)
+                return
+
+            order_id = order.get("order_id", parsed_id)
+            client_name = order.get("client_name", "—")
+            status = order.get("status", "—")
+            note = order.get("note", "—")
+            country = order.get("country", order.get("origin", "—"))
+            origin = order.get("origin")
+            updated_at = order.get("updated_at")
+
+            lines = [
+                f"*order_id:* `{order_id}`",
+                f"*client_name:* {client_name}",
+                f"*status:* {status}",
+                f"*note:* {note}",
+                f"*country:* {country}",
+            ]
+            if origin and origin != country:
+                lines.append(f"*origin:* {origin}")
+            if updated_at:
+                lines.append(f"*updated_at:* {updated_at}")
+
+            await update.message.reply_markdown("\n".join(lines))
+            context.user_data.pop("adm_mode", None)
             return
 
         # --- Поиск адресов по username (ввод списка) ---
