@@ -464,6 +464,7 @@ async def broadcast_all_unpaid(update, context):
     for order_id, users in grouped.items():
         unpaid_usernames = [u.lower() for u in users]
         user_ids = sheets.get_user_ids_by_usernames(unpaid_usernames)
+    logging.info("[remind] mapped user_ids=%s", user_ids)
         ok = 0
         fail = 0
         for uid in user_ids:
@@ -492,4 +493,5 @@ def register_admin_ui(application):
     from telegram.ext import CommandHandler, MessageHandler, filters
     application.add_handler(CommandHandler("admin", cmd_admin))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_admin_text))
+
 
