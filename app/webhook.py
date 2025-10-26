@@ -1,6 +1,5 @@
 # app/webhook.py
 import logging
-import asyncio
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
@@ -8,25 +7,27 @@ from fastapi.responses import Response
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder
 
-from .main import register_handlers  # ваши базовые хэндлеры
+from .main import register_handlers
 try:
-    from .main import register_admin_ui   # может отсутствовать на старых сборках
+    from .main import register_admin_ui
 except Exception:
-    register_admin_ui = None
+    register_admin_ui = None  # безопасно, чтобы деплой не падал
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
-
 application: Application | None = None
 
+
 async def _build_application() -> Application:
-    from .config import BOT_TOKEN, PUBLIC_URL  # ожидаются в env
+    from .config import BOT_TOKEN, PUBLIC_URL
     app_ = ApplicationBuilder().token(BOT_TOKEN).build()
+
     # базовые хэндлеры
     register_handlers(app_)
-    # админ-UI (если есть)
+
+    # админ-UI
     if register_admin_ui:
         try:
             register_admin_ui(app_)
@@ -34,11 +35,7 @@ async def _build_application() -> Application:
         except Exception as e:
             logger.warning("Admin UI not registered: %s", e)
 
-    # Пример: если нужен ежедневный джоб — зарегайте тут
-    # from .main import register_daily_unpaid_job
-    # register_daily_unpaid_job(app_)
-
-    # Вебхук
+    # вебхук
     if PUBLIC_URL:
         await app_.bot.set_webhook(f"{PUBLIC_URL.rstrip('/')}/telegram")
         logger.info("Webhook set to %s/telegram", PUBLIC_URL.rstrip('/'))
@@ -47,11 +44,13 @@ async def _build_application() -> Application:
 
     return app_
 
+
 @app.on_event("startup")
 async def on_startup():
     global application
     application = await _build_application()
-    logger.info("Background loop started.")
+    logger.info("Startup complete.")
+
 
 @app.post("/telegram")
 async def telegram(request: Request):
@@ -62,7 +61,7 @@ async def telegram(request: Request):
     data = await request.json()
     try:
         update = Update.de_json(data, application.bot)
-        # небольшая диагностика
+        # диагностика
         try:
             utype = (
                 "message" if getattr(update, "message", None) else
@@ -78,6 +77,7 @@ async def telegram(request: Request):
         logger.exception("Error processing update: %s", e)
 
     return Response(status_code=200)
+
 
 @app.get("/health")
 async def health():
