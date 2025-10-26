@@ -20,6 +20,26 @@ from .config import BOT_TOKEN, POLL_MINUTES
 from . import sheets
 from .texts import HELP
 from .statuses import STATUSES
+from .config import ADMIN_IDS
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from . import sheets
+# Единый справочник статусов (можешь править текст как нужно)
+STATUSES = [
+    "выкуплен",
+    "едет на адрес",
+    "приехал на адрес (Китай)",
+    "приехал на адрес (Корея)",
+    "сборка на доставку",
+    "отправлен в Казахстан (из Китая)",
+    "отправлен в Казахстан (из Кореи)",
+    "приехал к владельцу шопа в Астане",
+    "сборка заказа по Казахстану",
+    "собран и готов на доставку по Казахстану",
+    "отправлен по Казахстану",
+    "доставлен",
+    "получен",
+]
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -44,6 +64,92 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
     text = raw.lower()
+
+        # --- ADMIN FLOW ---
+    if update.effective_user.id in ADMIN_IDS:
+        mode = context.user_data.get("adm_mode")
+        raw = update.message.text.strip()
+
+        if mode == "add_order_id":
+            context.user_data["adm_buf"] = {"order_id": raw}
+            context.user_data["adm_mode"] = "add_order_client"
+            await update.message.reply_text("Имя клиента:")
+            return
+
+        if mode == "add_order_client":
+            context.user_data["adm_buf"]["client_name"] = raw
+            context.user_data["adm_mode"] = "add_order_country"
+            await update.message.reply_text("Страна/склад (CN или KR):")
+            return
+
+        if mode == "add_order_country":
+            country = raw.upper()
+            if country not in ("CN", "KR"):
+                await update.message.reply_text("Введи 'CN' (Китай) или 'KR' (Корея):")
+                return
+            context.user_data["adm_buf"]["country"] = country
+            context.user_data["adm_mode"] = "add_order_address"
+            await update.message.reply_text("ID адреса (если не используете — оставь пусто):")
+            return
+
+        if mode == "add_order_address":
+            context.user_data["adm_buf"]["address_id"] = raw
+            context.user_data["adm_mode"] = "add_order_status"
+            buttons = [[InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}")] for s in STATUSES[:6]]
+            await update.message.reply_text(
+                "Выбери стартовый статус кнопкой ниже или напиши свой:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        if mode == "add_order_status":
+            context.user_data["adm_buf"]["status"] = raw
+            context.user_data["adm_mode"] = "add_order_note"
+            await update.message.reply_text("Примечание (или '-' если нет):")
+            return
+
+        if mode == "add_order_note":
+            buf = context.user_data.get("adm_buf", {})
+            buf["note"] = raw if raw != "-" else ""
+            try:
+                sheets.add_order({
+                    "order_id": buf["order_id"],
+                    "client_name": buf.get("client_name", ""),
+                    "country": buf.get("country", ""),
+                    "address_id": buf.get("address_id", ""),
+                    "status": buf.get("status", "выкуплен"),
+                    "note": buf.get("note", ""),
+                })
+                await update.message.reply_text(f"Заказ *{buf['order_id']}* добавлен ✅", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"Ошибка: {e}")
+            finally:
+                context.user_data.pop("adm_mode", None)
+                context.user_data.pop("adm_buf", None)
+            return
+
+        if mode == "upd_order_id":
+            context.user_data["adm_buf"] = {"order_id": raw}
+            context.user_data["adm_mode"] = "upd_pick_status"
+            buttons = [[InlineKeyboardButton(s, callback_data=f"adm:set_status:{s}")] for s in STATUSES]
+            await update.message.reply_text("Выбери новый статус:", reply_markup=InlineKeyboardMarkup(buttons))
+            return
+
+        if mode == "find_order":
+            rec = sheets.get_order(raw)
+            if not rec:
+                await update.message.reply_text("Не найдено.")
+            else:
+                t = (
+                    f"*{rec.get('order_id')}*\n"
+                    f"Клиент: {rec.get('client_name','')}\n"
+                    f"Страна: {rec.get('country','')}\n"
+                    f"Статус: {rec.get('status','')}\n"
+                    f"Прим.: {rec.get('note','')}"
+                )
+                await update.message.reply_text(t, parse_mode="Markdown")
+            context.user_data.pop("adm_mode", None)
+            return
 
     # --- КОМАНДЫ ВСЕГДА В ПРИОРИТЕТЕ ---
     if text in {"отмена", "cancel"}:
@@ -209,6 +315,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+        if data.startswith("adm:pick_status:"):
+        if update.effective_user.id not in ADMIN_IDS:
+            return
+        status = data.split("adm:pick_status:", 1)[1]
+        context.user_data["adm_buf"]["status"] = status
+        context.user_data["adm_mode"] = "add_order_note"
+        await q.message.reply_text("Примечание (или '-' если нет):")
+        return
+
+    if data.startswith("adm:set_status:"):
+        if update.effective_user.id not in ADMIN_IDS:
+            return
+        status = data.split("adm:set_status:", 1)[1]
+        order_id = context.user_data.get("adm_buf", {}).get("order_id")
+        ok = sheets.update_order_status(order_id, status)
+        if ok:
+            await q.message.reply_text(
+                f"Статус *{order_id}* обновлён на: _{status}_ ✅",
+                parse_mode="Markdown",
+            )
+        else:
+            await q.message.reply_text("Заказ не найден.")
+        context.user_data.pop("adm_mode", None)
+        context.user_data.pop("adm_buf", None)
+        return
+
     if data.startswith("sub:"):
         order_id = data.split(":", 1)[1]
         sheets.subscribe(update.effective_user.id, order_id)
@@ -260,3 +392,58 @@ def main():
 
 if __name__ == "__main__":
     main()
+    def admin_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Добавить заказ", callback_data="adm:add")],
+        [InlineKeyboardButton("✏️ Изменить статус", callback_data="adm:update")],
+        [InlineKeyboardButton("🗂 Последние заказы", callback_data="adm:list")],
+        [InlineKeyboardButton("🔍 Найти заказ", callback_data="adm:find")],
+        [InlineKeyboardButton("↩️ Выйти", callback_data="adm:back")],
+    ])
+
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    await (update.message or update.callback_query.message).reply_text(
+        "Админ-панель SEABLUU:", reply_markup=admin_kb()
+    )
+    context.user_data.pop("adm_mode", None)
+    context.user_data.pop("adm_buf", None)
+async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+
+    if data == "adm:back":
+        context.user_data.pop("adm_mode", None)
+        context.user_data.pop("adm_buf", None)
+        await q.message.edit_text("Готово. Вы вышли из админ-панели.")
+        return
+
+    if data == "adm:add":
+        context.user_data["adm_mode"] = "add_order_id"
+        context.user_data["adm_buf"] = {}
+        await q.message.reply_text("Введи *order_id* (например: SB-12345):", parse_mode="Markdown")
+        return
+
+    if data == "adm:update":
+        context.user_data["adm_mode"] = "upd_order_id"
+        await q.message.reply_text("Введи *order_id* для изменения статуса:", parse_mode="Markdown")
+        return
+
+    if data == "adm:list":
+        orders = sheets.list_recent_orders(10)
+        if not orders:
+            await q.message.reply_text("Список пуст.")
+        else:
+            txt = "\n".join([f"• {o.get('order_id')} — {o.get('status','')}" for o in orders])
+            await q.message.reply_text(f"*Последние заказы:*\n{txt}", parse_mode="Markdown")
+        return
+
+    if data == "adm:find":
+        context.user_data["adm_mode"] = "find_order"
+        await q.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
+        return
+
