@@ -325,6 +325,7 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↩️ Выйти", callback_data="adm:back")],
     ])
 
+
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -333,6 +334,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data.pop("adm_mode", None)
     context.user_data.pop("adm_buf", None)
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Единый обработчик нажатий inline-кнопок."""
