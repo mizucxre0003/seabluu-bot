@@ -72,7 +72,7 @@ def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str,
     df_raw = df_from_ws(ws)
     df = _ensure_addresses_columns(df_raw)
     now = _now_iso()
-    uname = (username or "").lstrip("@")
+    uname = (username or "").lstrip("@").lower()
 
     if not df.empty:
         mask = df["user_id"] == user_id
@@ -383,7 +383,7 @@ def get_all_unpaid_grouped():
     """Return dict: {order_id: [username_lower, ...]} for all rows where paid == 'FALSE'.
     Safe to use for mass reminders."
     """
-    ws = _worksheet('participants')
+    ws = get_worksheet('participants')
     data = ws.get_all_records()
     result = {}
     for row in data:
@@ -396,4 +396,5 @@ def get_all_unpaid_grouped():
         except Exception:
             continue
     return result
+
 
