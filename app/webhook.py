@@ -11,6 +11,7 @@ from telegram.ext import (
 
 from .config import BOT_TOKEN
 from .main import start, help_cmd, handle_text, on_callback
+from app.main import admin_menu, on_admin_callback  # если ещё не добавлено
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_cmd))
 application.add_handler(CallbackQueryHandler(on_callback))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+application.add_handler(CommandHandler("admin", admin_menu))
+application.add_handler(CallbackQueryHandler(on_admin_callback, pattern=r"^adm:"))
 
 app = FastAPI()
 
