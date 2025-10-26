@@ -63,6 +63,18 @@ def extract_order_id(s: str) -> str | None:
 def is_valid_status(s: str, statuses: list[str]) -> bool:
     return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
 
+def status_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура статусов по 3 кнопки в ряд."""
+    rows, row = [], []
+    for s in STATUSES:
+        row.append(InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
 # ========= БАЗОВЫЕ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,9 +89,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Отследить заказ — статус по номеру\n"
         "• Мои адреса — добавить/изменить адрес\n"
         "• Мои подписки — список подписок на заказы\n"
-        "• /admin — админ-панель (только для админов)"
+        "• /admin — админ-панель (только для админов)\n"
+        "• /adminoff — выйти из админ-режима"
     )
 
+async def admin_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Быстрый выход из админ-режима."""
+    context.user_data.pop("adm_mode", None)
+    context.user_data.pop("adm_buf", None)
+    await update.message.reply_text("Админ-режим выключен.", reply_markup=MAIN_KB)
 
 # ========= ТЕКСТЫ/РЕЖИМЫ =========
 
@@ -89,6 +107,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- ADMIN FLOW (самый верх, чтобы перехватывать шаги админа) ---
     if update.effective_user.id in ADMIN_IDS:
+        # быстрый выход из админ-режима
+        if text in {"отмена", "cancel", "/cancel", "/adminoff"}:
+            context.user_data.pop("adm_mode", None)
+            context.user_data.pop("adm_buf", None)
+            await update.message.reply_text("Ок, вышли из админ-режима.", reply_markup=MAIN_KB)
+            return
+
         mode = context.user_data.get("adm_mode")
 
         # Добавление заказа: order_id -> client_name -> country -> status -> note -> save
@@ -111,20 +136,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             context.user_data["adm_buf"]["country"] = country
             context.user_data["adm_mode"] = "add_order_status"
-            buttons = [[InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}")] for s in STATUSES[:6]]
             await update.message.reply_text(
                 "Выбери стартовый статус кнопкой ниже или напиши точный текст статуса:",
-                reply_markup=InlineKeyboardMarkup(buttons),
+                reply_markup=status_keyboard(),
             )
             return
 
         if mode == "add_order_status":
             # Строгая проверка: разрешаем только из STATUSES
             if not is_valid_status(raw, STATUSES):
-                buttons = [[InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}")] for s in STATUSES[:6]]
                 await update.message.reply_text(
                     "Пожалуйста, выбери статус кнопкой ниже (или напиши точный текст статуса из списка):",
-                    reply_markup=InlineKeyboardMarkup(buttons),
+                    reply_markup=status_keyboard(),
                 )
                 return
             context.user_data["adm_buf"]["status"] = raw.strip()
@@ -461,5 +484,6 @@ def register_handlers(application):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CommandHandler("adminoff", admin_off))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
