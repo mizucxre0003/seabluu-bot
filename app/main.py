@@ -307,6 +307,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Заказ не найден.")
                 context.user_data.pop("adm_mode", None)
                 return
+
+            # ⬇️ НОВОЕ: если нет участников — создаём их из client_name (списка @username)
+            parts = sheets.get_participants(parsed_id)
+            if not parts:
+                client_field = order.get("client_name", "") or ""
+                usernames = [m.group(1) for m in USERNAME_RE.finditer(client_field)]
+                if usernames:
+                    try:
+                        sheets.ensure_participants(parsed_id, usernames)
+                        parts = sheets.get_participants(parsed_id)
+                    except Exception as e:
+                        logging.warning(f"ensure_participants failed: {e}")
+
+            # Если и после автосоздания пусто — скажем об этом
+            if not parts:
+                await update.message.reply_text(
+                    "В этом заказе нет участников. Добавьте @username в client_name и пере-сохраните заказ, "
+                    "или добавьте вручную в лист participants."
+                )
+                context.user_data.pop("adm_mode", None)
+                return
+
             await show_payments_panel(update, context, parsed_id)
             return
 
