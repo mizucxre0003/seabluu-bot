@@ -67,7 +67,6 @@ def _ensure_orders_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df[cols]
 
 def get_order(order_id: str) -> Optional[Dict[str, Any]]:
-    """Вернуть строку заказа по order_id (или None)."""
     ws = get_worksheet("orders")
     rows = ws.get_all_records()
     for r in rows:
@@ -76,13 +75,8 @@ def get_order(order_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 def add_order(order: Dict[str, Any] = None, **kwargs) -> None:
-    """
-    add_order({...}) или add_order(order_id=..., client_name=..., ...)
-    Поля: order_id, client_name, phone, origin, status, note, country
-    """
     data = dict(order or {})
     data.update(kwargs)
-
     if not data.get("order_id"):
         raise ValueError("order_id is required")
 
@@ -92,7 +86,6 @@ def add_order(order: Dict[str, Any] = None, **kwargs) -> None:
     if not df.empty:
         df = _ensure_orders_cols(df)
 
-    # если уже есть — просто обновим строку
     now = _now()
     if df.empty:
         df = pd.DataFrame([{
@@ -196,7 +189,6 @@ def list_addresses(user_id: int) -> List[Dict[str, Any]]:
     return result
 
 def delete_address(user_id: int) -> bool:
-    """Удалить все адреса пользователя (возвращает True если что-то удалили)."""
     ws = get_worksheet("addresses")
     values = ws.get_all_records()
     if not values:
@@ -319,7 +311,7 @@ def _ensure_part_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df[cols]
 
 def ensure_participants(order_id: str, usernames: List[str]) -> None:
-    """Добавить участников в лист participants (если их ещё нет), paid=FALSE."""
+    """Добавить участников в participants (если их ещё нет), paid=FALSE."""
     ws = get_worksheet("participants")
     values = ws.get_all_records()
     df = pd.DataFrame(values)
@@ -343,10 +335,67 @@ def ensure_participants(order_id: str, usernames: List[str]) -> None:
         to_add.append([order_id, uname, "FALSE", "", now, now])
 
     if to_add:
-        # Если лист пустой — убедимся, что есть шапка
         if not values:
             ws.append_row(["order_id", "username", "paid", "qty", "created_at", "updated_at"])
         ws.append_rows(to_add)
+
+def get_participants(order_id: str) -> List[Dict[str, Any]]:
+    """Список участников по разбору с полями username/paid/qty."""
+    ws = get_worksheet("participants")
+    data = ws.get_all_records()
+    res: List[Dict[str, Any]] = []
+    for r in data:
+        if str(r.get("order_id", "")).strip().lower() == order_id.strip().lower():
+            res.append({
+                "order_id": r.get("order_id", ""),
+                "username": str(r.get("username", "")).strip().lower(),
+                "paid": str(r.get("paid", "")).strip().lower() in ("true", "1", "yes", "y"),
+                "qty": r.get("qty", ""),
+            })
+    # сортировка по username
+    res.sort(key=lambda x: x["username"])
+    return res
+
+def set_participant_paid(order_id: str, username: str, paid: bool) -> bool:
+    """Установить paid для username в разборе."""
+    ws = get_worksheet("participants")
+    values = ws.get_all_records()
+    if not values:
+        return False
+    df = pd.DataFrame(values)
+    df = _ensure_part_cols(df)
+    uname = (username or "").lstrip("@").lower()
+    mask = (df["order_id"].astype(str).str.lower() == order_id.lower()) & (df["username"].astype(str).str.lower() == uname)
+    if not mask.any():
+        return False
+    df.loc[mask, "paid"] = "TRUE" if paid else "FALSE"
+    df.loc[mask, "updated_at"] = _now()
+    ws.clear()
+    ws.append_row(list(df.columns))
+    if len(df):
+        ws.append_rows(df.values.tolist())
+    return True
+
+def toggle_participant_paid(order_id: str, username: str) -> bool:
+    """Инвертировать paid для username; вернуть True, если нашли и обновили."""
+    ws = get_worksheet("participants")
+    values = ws.get_all_records()
+    if not values:
+        return False
+    df = pd.DataFrame(values)
+    df = _ensure_part_cols(df)
+    uname = (username or "").lstrip("@").lower()
+    mask = (df["order_id"].astype(str).str.lower() == order_id.lower()) & (df["username"].astype(str).str.lower() == uname)
+    if not mask.any():
+        return False
+    current = str(df.loc[mask, "paid"].iloc[0]).strip().lower() in ("true", "1", "yes", "y")
+    df.loc[mask, "paid"] = "FALSE" if current else "TRUE"
+    df.loc[mask, "updated_at"] = _now()
+    ws.clear()
+    ws.append_row(list(df.columns))
+    if len(df):
+        ws.append_rows(df.values.tolist())
+    return True
 
 def get_unpaid_usernames(order_id: str) -> List[str]:
     ws = get_worksheet("participants")
@@ -372,7 +421,6 @@ def get_all_unpaid_grouped() -> Dict[str, List[str]]:
     return grouped
 
 def find_orders_for_username(username: str) -> List[str]:
-    """Вернуть список order_id по username из participants."""
     uname = (username or "").lstrip("@").lower()
     if not uname:
         return []
@@ -384,7 +432,6 @@ def find_orders_for_username(username: str) -> List[str]:
             oid = str(row.get("order_id", "")).strip()
             if oid:
                 result.append(oid)
-    # уникальные, в исходном порядке
     seen = set(); uniq = []
     for x in result:
         if x not in seen:
