@@ -63,7 +63,6 @@ def is_valid_status(s: str, statuses: list[str]) -> bool:
     return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
 
 def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
-    """Клавиатура статусов: короткие callback-и, по 2 кнопки в ряд."""
     rows, row = [], []
     for i, s in enumerate(STATUSES):
         row.append(InlineKeyboardButton(s, callback_data=f"adm:pick_status_id:{i}"))
@@ -178,7 +177,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Не похоже на номер. Пример: KR-12345")
                 return
 
-            # Проверяем, что заказ существует, прежде чем показывать статусы
             if not sheets.get_order(parsed_id):
                 await update.message.reply_text("Заказ не найден.")
                 context.user_data.pop("adm_mode", None)
@@ -195,9 +193,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(rows),
             )
             return
-
-        # УБРАНО: никакой автоматической реакции на order_id вне явного режима обновления
-        # (чтобы после выхода из админ-режима клавиатура статусов не появлялась сама)
 
         if mode == "find_order":
             rec = sheets.get_order(raw)
@@ -317,9 +312,12 @@ async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order
     if origin:
         txt += f"\nСтрана/источник: {origin}"
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")
-    ]])
+    # показываем Подписаться/Отписаться динамически
+    if sheets.is_subscribed(update.effective_user.id, order_id):
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub:{order_id}")]])
+    else:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")]])
+
     await update.message.reply_markdown(txt, reply_markup=kb)
     context.user_data["mode"] = None
 
@@ -369,8 +367,38 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not subs:
         await update.message.reply_text("Подписок пока нет. Отследите заказ и нажмите «Подписаться».")
         return
-    txt = "\n".join([f"• {s['order_id']} (последний статус: {s.get('last_sent_status','—')})" for s in subs])
-    await update.message.reply_text("Ваши подписки:\n" + txt)
+
+    # текст + кнопки "🗑 Отписаться" на каждую подписку
+    txt_lines, kb_rows = [], []
+    for s in subs:
+        last = s.get("last_sent_status","—")
+        order_id = s["order_id"]
+        txt_lines.append(f"• {order_id} (последний статус: {last})")
+        kb_rows.append([InlineKeyboardButton(f"🗑 Отписаться от {order_id}", callback_data=f"unsub:{order_id}")])
+
+    await update.message.reply_text(
+        "Ваши подписки:\n" + "\n".join(txt_lines),
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+    )
+
+# ======= уведомление подписчиков немедленно после изменения =======
+
+async def notify_subscribers(application, order_id: str, new_status: str):
+    subs = sheets.get_all_subscriptions()
+    if not subs:
+        return
+    targets = [s for s in subs if str(s.get("order_id")) == str(order_id)]
+    for s in targets:
+        uid = int(s["user_id"])
+        try:
+            await application.bot.send_message(
+                chat_id=uid,
+                text=f"Обновление по заказу *{order_id}*\nНовый статус: *{new_status}*",
+                parse_mode="Markdown",
+            )
+            sheets.set_last_sent_status(uid, order_id, new_status)
+        except Exception as e:
+            logging.warning(f"notify_subscribers fail to {uid}: {e}")
 
 # ========= CALLBACKS =========
 
@@ -464,18 +492,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Статус *{order_id}* обновлён на: _{status}_ ✅",
                 parse_mode="Markdown",
             )
+            # уведомляем подписчиков мгновенно
+            await notify_subscribers(context.application, order_id, status)
         else:
             await q.message.reply_text("Заказ не найден.")
         context.user_data.pop("adm_mode", None)
         context.user_data.pop("adm_buf", None)
         return
 
-    # пользовательские кнопки
+    # пользовательские кнопки «Подписаться/Отписаться»
     if data.startswith("sub:"):
         order_id = data.split(":", 1)[1]
         sheets.subscribe(update.effective_user.id, order_id)
-        await q.edit_message_reply_markup(reply_markup=None)
+        await q.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub:{order_id}")]])
+        )
         await q.message.reply_text("Готово! Буду присылать обновления по этому заказу 🔔")
+        return
+
+    if data.startswith("unsub:"):
+        order_id = data.split(":", 1)[1]
+        ok = sheets.unsubscribe(update.effective_user.id, order_id)
+        await q.message.reply_text("Отписка выполнена." if ok else "Вы и так не были подписаны.")
+        # если это было из карточки заказа — поменяем кнопку назад на «Подписаться»
+        try:
+            await q.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")]])
+            )
+        except Exception:
+            pass
         return
 
     if data == "addr:add":
