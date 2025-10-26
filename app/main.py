@@ -20,8 +20,9 @@ from .config import BOT_TOKEN, POLL_MINUTES
 from . import sheets
 from .texts import HELP
 from .statuses import STATUSES
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ContextTypes
 from .config import ADMIN_IDS
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from . import sheets
 # Единый справочник статусов (можешь править текст как нужно)
 STATUSES = [
@@ -312,19 +313,24 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("Ваши подписки:\n" + txt)
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-        if data.startswith("adm:pick_status:"):
+    """Единый обработчик нажатий inline-кнопок."""
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+
+    # ===== АДМИН-КНОПКИ (две ветки) =====
+    if data.startswith("adm:pick_status:"):
+        # Выбор стартового статуса при добавлении заказа
         if update.effective_user.id not in ADMIN_IDS:
             return
         status = data.split("adm:pick_status:", 1)[1]
-        context.user_data["adm_buf"]["status"] = status
+        context.user_data.setdefault("adm_buf", {})["status"] = status
         context.user_data["adm_mode"] = "add_order_note"
         await q.message.reply_text("Примечание (или '-' если нет):")
         return
 
     if data.startswith("adm:set_status:"):
+        # Выбор нового статуса при обновлении существующего заказа
         if update.effective_user.id not in ADMIN_IDS:
             return
         status = data.split("adm:set_status:", 1)[1]
@@ -337,6 +343,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await q.message.reply_text("Заказ не найден.")
+        # очистим режим
         context.user_data.pop("adm_mode", None)
         context.user_data.pop("adm_buf", None)
         return
