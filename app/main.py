@@ -20,7 +20,7 @@ from .config import ADMIN_IDS  # только для проверки прав �
 
 logging.basicConfig(level=logging.INFO)
 
-# Единый справочник статусов (правь при необходимости)
+# Справочник статусов (можно править тут)
 STATUSES = [
     "выкуплен",
     "едет на адрес",
@@ -46,7 +46,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# ====== помощники для order_id и валидности статуса ======
+# ====== Хелперы ======
 ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—]?\s?(\d{3,})", re.IGNORECASE)
 
 def extract_order_id(s: str) -> str | None:
@@ -62,22 +62,22 @@ def extract_order_id(s: str) -> str | None:
 def is_valid_status(s: str, statuses: list[str]) -> bool:
     return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
 
-def status_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура статусов по 3 кнопки в ряд (в callback передаём КОРОТКИЙ ID)."""
+def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
+    """Клавиатура статусов: короткие callback-и, по 2 кнопки в ряд."""
     rows, row = [], []
     for i, s in enumerate(STATUSES):
         row.append(InlineKeyboardButton(s, callback_data=f"adm:pick_status_id:{i}"))
-        if len(row) == 3:
+        if len(row) == cols:
             rows.append(row); row = []
     if row:
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-# ========= БАЗОВЫЕ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =========
+# ========= БАЗОВЫЕ КОМАНДЫ =========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я бот SEABLUU для отслеживания заказов и адресов. Выберите действие ниже.",
+        "Привет! Я бот SEABLUU для отслеживания заказов и адресов.",
         reply_markup=MAIN_KB,
     )
 
@@ -86,8 +86,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команды:\n"
         "• Отследить заказ — статус по номеру\n"
         "• Мои адреса — добавить/изменить адрес\n"
-        "• Мои подписки — список подписок на заказы\n"
-        "• /admin — админ-панель (только для админов)\n"
+        "• Мои подписки — список подписок\n"
+        "• /admin — админ-панель (для админов)\n"
         "• /adminoff — выйти из админ-режима"
     )
 
@@ -96,7 +96,7 @@ async def admin_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("adm_buf", None)
     await update.message.reply_text("Админ-режим выключен.", reply_markup=MAIN_KB)
 
-# ========= ТЕКСТЫ/РЕЖИМЫ =========
+# ========= ОСНОВНАЯ ЛОГИКА =========
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
@@ -133,16 +133,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["adm_buf"]["country"] = country
             context.user_data["adm_mode"] = "add_order_status"
             await update.message.reply_text(
-                "Выбери стартовый статус кнопкой ниже или напиши точный текст статуса:",
-                reply_markup=status_keyboard(),
+                "Стартовый статус:",
+                reply_markup=status_keyboard(cols=2),
             )
             return
 
         if mode == "add_order_status":
             if not is_valid_status(raw, STATUSES):
                 await update.message.reply_text(
-                    "Пожалуйста, выбери статус кнопкой ниже (или напиши точный текст статуса из списка):",
-                    reply_markup=status_keyboard(),
+                    "Выбери статус кнопкой ниже или напиши точный из списка:",
+                    reply_markup=status_keyboard(cols=2),
                 )
                 return
             context.user_data["adm_buf"]["status"] = raw.strip()
@@ -177,30 +177,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not parsed_id:
                 await update.message.reply_text("Не похоже на номер. Пример: KR-12345")
                 return
+
+            # Проверяем, что заказ существует, прежде чем показывать статусы
+            if not sheets.get_order(parsed_id):
+                await update.message.reply_text("Заказ не найден.")
+                context.user_data.pop("adm_mode", None)
+                context.user_data.pop("adm_buf", None)
+                return
+
             context.user_data.setdefault("adm_buf", {})["order_id"] = parsed_id
             context.user_data["adm_mode"] = "upd_pick_status"
 
             rows = [[InlineKeyboardButton(s, callback_data=f"adm:set_status_id:{i}")]
                     for i, s in enumerate(STATUSES)]
             await update.message.reply_text(
-                f"Принял номер: *{parsed_id}*.\nВыбери новый статус:",
+                "Выберите статус:",
                 reply_markup=InlineKeyboardMarkup(rows),
-                parse_mode="Markdown",
             )
             return
 
-        parsed_id = extract_order_id(raw)
-        if mode is None and parsed_id:
-            context.user_data.setdefault("adm_buf", {})["order_id"] = parsed_id
-            context.user_data["adm_mode"] = "upd_pick_status"
-            rows = [[InlineKeyboardButton(s, callback_data=f"adm:set_status_id:{i}")]
-                    for i, s in enumerate(STATUSES)]
-            await update.message.reply_text(
-                f"Заказ *{parsed_id}* обнаружен. Выбери новый статус:",
-                reply_markup=InlineKeyboardMarkup(rows),
-                parse_mode="Markdown",
-            )
-            return
+        # УБРАНО: никакой автоматической реакции на order_id вне явного режима обновления
+        # (чтобы после выхода из админ-режима клавиатура статусов не появлялась сама)
 
         if mode == "find_order":
             rec = sheets.get_order(raw)
@@ -221,12 +218,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode:
             await update.message.reply_text(
                 "Жду действие в админ-режиме.\n"
-                "Пришли номер заказа в формате KR-12345 или нажми нужную кнопку.",
+                "Нажми кнопку или пришли номер заказа (KR-12345).",
                 reply_markup=admin_kb(),
             )
             return
 
-    # --- КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ---
+    # --- USER FLOW ---
     if text in {"отмена", "cancel"}:
         context.user_data["mode"] = None
         await update.message.reply_text("Ок, отменил. Что дальше?", reply_markup=MAIN_KB)
@@ -247,14 +244,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_subscriptions(update, context)
         return
 
-    # --- РЕЖИМЫ ВВОДА ---
     mode = context.user_data.get("mode")
 
     if mode == "track":
-        order_id = raw
-        await query_status(update, context, order_id)
+        await query_status(update, context, raw)
         return
 
+    # Адрес — пошаговый ввод
     if mode == "add_address_fullname":
         context.user_data["full_name"] = raw
         await update.message.reply_text("Телефон (пример: 87001234567):")
@@ -269,8 +265,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             normalized = "8" + normalized[1:]
         if not (normalized.isdigit() and len(normalized) == 11 and normalized.startswith("8")):
             await update.message.reply_text(
-                "Похоже на неверный номер. Нужно 11 цифр и обязательно с 8.\n"
-                "Пример: 87001234567\n"
+                "Нужно 11 цифр и обязательно с 8. Пример: 87001234567\n"
                 "Введи номер ещё раз или нажми «Отмена»:"
             )
             return
@@ -282,7 +277,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "add_address_city":
         context.user_data["city"] = raw
         await update.message.reply_text(
-            "Адрес (можно в свободной форме):\nПример: Туран 34А, 6 подъезд, 8 этаж, кв. 12"
+            "Адрес (свободный формат):\nПример: Туран 34А, 6 подъезд, 8 этаж, кв. 12"
         )
         context.user_data["mode"] = "add_address_address"
         return
@@ -309,6 +304,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========= БИЗНЕС-ФУНКЦИИ =========
 
 async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    order_id = extract_order_id(order_id) or order_id
     order = sheets.get_order(order_id)
     if not order:
         await update.message.reply_text("Такой заказ не найден. Проверьте номер или повторите позже.")
@@ -436,7 +432,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
         return
 
-    # выбор статуса при добавлении: adm:pick_status_id:{i}
+    # выбор статуса при добавлении
     if data.startswith("adm:pick_status_id:"):
         if update.effective_user.id not in ADMIN_IDS:
             return
@@ -451,7 +447,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Примечание (или '-' если нет):")
         return
 
-    # смена статуса: adm:set_status_id:{i}
+    # смена статуса
     if data.startswith("adm:set_status_id:"):
         if update.effective_user.id not in ADMIN_IDS:
             return
