@@ -165,3 +165,78 @@ def scan_updates():
     # сохранить last_sent_status
     ws_sub.clear(); ws_sub.append_row(list(df_sub.columns)); ws_sub.append_rows(df_sub.values.tolist())
     return to_send
+# ---------- ADMIN HELPERS ----------
+
+ADMIN_ORDERS_WS = "orders"  # имя листа с заказами
+
+def add_order(record: dict) -> None:
+    """
+    record = {
+      "order_id": "SB-12345",
+      "client_name": "...",
+      "country": "CN|KR",
+      "address_id": "",         # если используете ID адреса в другом листе (или оставьте пустым)
+      "status": "выкуплен",
+      "note": "прим."
+    }
+    """
+    ws = get_worksheet(ADMIN_ORDERS_WS)
+    df = df_from_ws(ws)
+
+    # если столбцов нет – создаём заголовки
+    if df.empty:
+        df = pd.DataFrame(columns=[
+            "order_id","client_name","country","address_id","status","note","updated_at"
+        ])
+
+    if (df["order_id"] == record["order_id"]).any():
+        raise ValueError("Такой order_id уже существует")
+
+    record["updated_at"] = now_ts()
+    df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+
+    ws.clear()
+    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+
+
+def update_order_status(order_id: str, new_status: str) -> bool:
+    """Возвращает True если обновили, False если не нашли"""
+    ws = get_worksheet(ADMIN_ORDERS_WS)
+    df = df_from_ws(ws)
+    if df.empty:
+        return False
+    hit = df["order_id"] == order_id
+    if not hit.any():
+        return False
+    df.loc[hit, "status"] = new_status
+    df.loc[hit, "updated_at"] = now_ts()
+    ws.clear()
+    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+    return True
+
+
+def get_order(order_id: str) -> dict | None:
+    ws = get_worksheet(ADMIN_ORDERS_WS)
+    df = df_from_ws(ws)
+    if df.empty:
+        return None
+    row = df[df["order_id"] == order_id]
+    if row.empty:
+        return None
+    return row.iloc[0].to_dict()
+
+
+def list_recent_orders(limit: int = 10) -> list[dict]:
+    ws = get_worksheet(ADMIN_ORDERS_WS)
+    df = df_from_ws(ws)
+    if df.empty:
+        return []
+    # сортируем по времени
+    if "updated_at" in df.columns:
+        df = df.sort_values("updated_at", ascending=False)
+    return df.head(limit).fillna("").to_dict(orient="records")
+
+
+def now_ts() -> str:
+    from datetime import datetime
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
