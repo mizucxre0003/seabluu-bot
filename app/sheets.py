@@ -106,7 +106,7 @@ def subscribe(user_id:int, order_id:str):
     ws = get_worksheet("subscriptions")
     df = df_from_ws(ws)
     now = pd.Timestamp.utcnow().isoformat()
-    # узнаём текущий статус, чтобы не слать старые
+    # текущий статус, чтобы не слать «старое»
     order = get_order(order_id)
     last = order.get("status") if order else ""
     if df.empty:
@@ -133,11 +133,38 @@ def unsubscribe(user_id:int, order_id:str):
         ws.append_row(list(new.columns)); ws.append_rows(new.values.tolist())
     return True
 
+def is_subscribed(user_id:int, order_id:str) -> bool:
+    ws = get_worksheet("subscriptions")
+    df = df_from_ws(ws)
+    if df.empty: 
+        return False
+    mask = (df["user_id"]==user_id) & (df["order_id"].astype(str)==str(order_id))
+    return bool(mask.any())
+
 def list_subscriptions(user_id:int):
     ws = get_worksheet("subscriptions")
     df = df_from_ws(ws)
     if df.empty: return []
     return df[df["user_id"]==user_id].to_dict("records")
+
+def get_all_subscriptions() -> list[dict]:
+    ws = get_worksheet("subscriptions")
+    df = df_from_ws(ws)
+    if df.empty: 
+        return []
+    return df.to_dict("records")
+
+def set_last_sent_status(user_id:int, order_id:str, new_status:str):
+    ws = get_worksheet("subscriptions")
+    df = df_from_ws(ws)
+    if df.empty: 
+        return
+    mask = (df["user_id"]==user_id) & (df["order_id"].astype(str)==str(order_id))
+    if not mask.any():
+        return
+    now = pd.Timestamp.utcnow().isoformat()
+    df.loc[df.index[mask], ["last_sent_status","updated_at"]] = [new_status, now]
+    ws.clear(); ws.append_row(list(df.columns)); ws.append_rows(df.values.tolist())
 
 def scan_updates():
     """Сравнивает статусы и возвращает список уведомлений к отправке:
@@ -172,27 +199,15 @@ def now_ts() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 def _ensure_order_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Гарантируем базовые столбцы и не ломаем существующие.
-       address_id не обязателен: если он есть — просто будет пустым."""
     base_cols = ["order_id","client_name","phone","origin","status","note","country","updated_at"]
     if df.empty:
         return pd.DataFrame(columns=base_cols)
-    # добавим недостающие базовые
     for c in base_cols:
         if c not in df.columns:
             df[c] = ""
     return df
 
 def add_order(record: dict) -> None:
-    """
-    record = {
-      "order_id": "SB-12345",
-      "client_name": "...",
-      "country": "CN|KR",
-      "status": "выкуплен",
-      "note": "прим."
-    }
-    """
     ws = get_worksheet(ADMIN_ORDERS_WS)
     df = _ensure_order_columns(df_from_ws(ws))
 
@@ -223,7 +238,6 @@ def update_order_status(order_id: str, new_status: str) -> bool:
     if not hit.any():
         return False
     df.loc[hit, "status"] = new_status
-    # обновим last_update/updated_at — в зависимости от того, что есть
     if "updated_at" in df.columns:
         df.loc[hit, "updated_at"] = now_ts()
     if "last_update" in df.columns:
@@ -237,7 +251,6 @@ def list_recent_orders(limit: int = 10) -> list[dict]:
     df = df_from_ws(ws)
     if df.empty:
         return []
-    # сортируем по времени, если есть подходящая колонка
     sort_col = "updated_at" if "updated_at" in df.columns else ("last_update" if "last_update" in df.columns else None)
     if sort_col:
         df = df.sort_values(sort_col, ascending=False)
