@@ -68,11 +68,12 @@ def _now_h() -> str:
 
 # ======== addresses ========
 def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str, postcode:str, username:str|None=""):
+    """Upsert address; store username canonically in lowercase (no leading @)."""
     ws = get_worksheet("addresses")
     df_raw = df_from_ws(ws)
     df = _ensure_addresses_columns(df_raw)
     now = _now_iso()
-    uname = (username or "").lstrip("@")
+    uname = (username or "").lstrip("@").lower()
 
     if not df.empty:
         mask = df["user_id"] == user_id
@@ -376,3 +377,4 @@ def find_orders_for_username(username: str) -> list[str]:
         return []
     mask = df["username"].astype(str).str.lower() == uname
     return list({str(x) for x in df[mask]["order_id"].astype(str).tolist() if str(x).strip()})
+
