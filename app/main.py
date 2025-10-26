@@ -27,7 +27,7 @@ STATUSES = [
     "едет на адрес",
     "приехал на адрес (Китай)",
     "приехал на адрес (Корея)",
-    "сборка на доставку",
+    "ожидает отправку в Казахстан",
     "отправлен в Казахстан (из Китая)",
     "отправлен в Казахстан (из Кореи)",
     "приехал к владельцу шопа в Астане",
@@ -43,7 +43,7 @@ UNPAID_STATUS = "доставка не оплачена"
 
 MAIN_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Отследить заказ")],
+        [KeyboardButton("Отследить разбор")],
         [KeyboardButton("Мои адреса"), KeyboardButton("Мои подписки")],
         [KeyboardButton("Отмена")],
     ],
@@ -80,10 +80,10 @@ def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("➕ Добавить заказ", callback_data="adm:add")],
+            [InlineKeyboardButton("➕ Добавить разбор", callback_data="adm:add")],
             [InlineKeyboardButton("✏️ Изменить статус", callback_data="adm:update")],
-            [InlineKeyboardButton("🗂 Последние заказы", callback_data="adm:list")],
-            [InlineKeyboardButton("🔍 Найти заказ", callback_data="adm:find")],
+            [InlineKeyboardButton("🗂 Последние разборы", callback_data="adm:list")],
+            [InlineKeyboardButton("🔍 Найти разбор", callback_data="adm:find")],
             [InlineKeyboardButton("🔎 Адрес по username", callback_data="adm:addrbyuser")],
             [InlineKeyboardButton("💳 Оплата по разбору", callback_data="adm:payments")],
             [InlineKeyboardButton("📣 Напомнить должникам", callback_data="adm:remind_unpaid")],
