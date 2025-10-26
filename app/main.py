@@ -178,18 +178,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("adm_buf", None)
             return
 
-        # Смена статуса: примем order_id даже без явного режима — извлечём из строки
-        parsed_id = extract_order_id(raw)
-        if mode == "upd_order_id" or (mode is None and parsed_id):
+        # ---- ИЗМЕНЕНИЕ СТАТУСА: явный и неявный сценарии ----
+
+        # 1) Мы В УЖЕ режиме upd_order_id — ждём только номер, всегда отвечаем текстом + кнопками
+        if mode == "upd_order_id":
+            parsed_id = extract_order_id(raw)
             if not parsed_id:
-                await update.message.reply_text("Пришли номер заказа, например: KR-12345")
+                await update.message.reply_text("Не похоже на номер. Пример: KR-12345")
                 return
             context.user_data.setdefault("adm_buf", {})["order_id"] = parsed_id
             context.user_data["adm_mode"] = "upd_pick_status"
-            buttons = [[InlineKeyboardButton(s, callback_data=f"adm:set_status:{s}")] for s in STATUSES]
+
+            rows = [[InlineKeyboardButton(s, callback_data=f"adm:set_status:{s}")] for s in STATUSES]
             await update.message.reply_text(
-                f"Заказ *{parsed_id}*. Выбери новый статус:",
-                reply_markup=InlineKeyboardMarkup(buttons),
+                f"Принял номер: *{parsed_id}*.\nВыбери новый статус:",
+                reply_markup=InlineKeyboardMarkup(rows),
+                parse_mode="Markdown",
+            )
+            return
+
+        # 2) ВНЕ режима: админ просто прислал строку с номером — подхватываем
+        parsed_id = extract_order_id(raw)
+        if mode is None and parsed_id:
+            context.user_data.setdefault("adm_buf", {})["order_id"] = parsed_id
+            context.user_data["adm_mode"] = "upd_pick_status"
+            rows = [[InlineKeyboardButton(s, callback_data=f"adm:set_status:{s}")] for s in STATUSES]
+            await update.message.reply_text(
+                f"Заказ *{parsed_id}* обнаружен. Выбери новый статус:",
+                reply_markup=InlineKeyboardMarkup(rows),
                 parse_mode="Markdown",
             )
             return
@@ -208,6 +224,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await update.message.reply_text(t, parse_mode="Markdown")
             context.user_data.pop("adm_mode", None)
+            return
+
+        # Страховка: если в админ-режиме и ничего не сработало — подскажем
+        if mode:
+            await update.message.reply_text(
+                "Жду действие в админ-режиме.\n"
+                "Пришли номер заказа в формате KR-12345 или нажми нужную кнопку.",
+                reply_markup=admin_kb(),
+            )
             return
 
     # --- КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ---
