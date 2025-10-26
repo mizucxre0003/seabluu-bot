@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
@@ -32,7 +33,6 @@ def get_worksheet(name: str):
             return ws
         if name == "addresses":
             ws = sh.add_worksheet(title="addresses", rows=1000, cols=20)
-            # сразу создаём колонку username
             ws.append_row(["user_id","username","full_name","phone","city","address","postcode","created_at","updated_at"])
             return ws
         if name == "subscriptions":
@@ -47,7 +47,6 @@ def df_from_ws(ws) -> pd.DataFrame:
 
 # ======== helpers ========
 def _ensure_addresses_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Гарантируем наличие колонок, включая username (на старых листах её могло не быть)."""
     need = ["user_id","username","full_name","phone","city","address","postcode","created_at","updated_at"]
     if df.empty:
         return pd.DataFrame(columns=need)
@@ -112,7 +111,6 @@ def delete_address(user_id:int):
     return True
 
 def get_addresses_by_usernames(usernames: list[str]) -> list[dict]:
-    """Вернёт записи по списку username'ов (без @), регистр игнорируется."""
     usernames = [u.lstrip("@").strip().lower() for u in usernames if u.strip()]
     if not usernames:
         return []
@@ -124,7 +122,21 @@ def get_addresses_by_usernames(usernames: list[str]) -> list[dict]:
     res = df[df["__u"].isin(usernames)].drop(columns=["__u"])
     return res.to_dict("records")
 
-# ======== orders & subscriptions (без изменений по смыслу) ========
+def get_user_ids_by_usernames(usernames: list[str]) -> list[int]:
+    """
+    Ищет user_id в листе 'addresses' по списку username (без @), регистр игнорируется.
+    """
+    recs = get_addresses_by_usernames(usernames)
+    ids = []
+    for r in recs:
+        try:
+            ids.append(int(r.get("user_id")))
+        except Exception:
+            pass
+    # уникальные
+    return list({i for i in ids})
+
+# ======== orders & subscriptions ========
 
 def get_order(order_id:str):
     ws = get_worksheet("orders")
@@ -285,3 +297,32 @@ def list_recent_orders(limit: int = 10) -> list[dict]:
     if sort_col:
         df = df.sort_values(sort_col, ascending=False)
     return df.head(limit).fillna("").to_dict(orient="records")
+
+def list_orders_by_status(status: str) -> list[dict]:
+    """
+    Вернёт заказы с нужным статусом (используем для ежедневной рассылки unpaid).
+    """
+    ws = get_worksheet(ADMIN_ORDERS_WS)
+    df = df_from_ws(ws)
+    if df.empty:
+        return []
+    mask = df["status"].astype(str).str.strip().str.lower() == str(status or "").strip().lower()
+    return df[mask].fillna("").to_dict(orient="records")
+
+def find_orders_for_username(username: str) -> list[str]:
+    """
+    Возвращает order_id всех заказов из 'orders', где в note присутствует @username (для автоподписки).
+    """
+    if not username:
+        return []
+    uname = username.strip().lstrip("@")
+    if not uname:
+        return []
+
+    ws = get_worksheet("orders")
+    df = df_from_ws(ws)
+    if df.empty:
+        return []
+    pattern = re.compile(rf"@{re.escape(uname)}\b", re.IGNORECASE)
+    hits = df[df["note"].astype(str).str.contains(pattern)].copy()
+    return list({str(x) for x in hits["order_id"].astype(str).tolist() if str(x).strip()})
