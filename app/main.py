@@ -376,3 +376,120 @@ def find_orders_for_username(username: str) -> list[str]:
         return []
     mask = df["username"].astype(str).str.lower() == uname
     return list({str(x) for x in df[mask]["order_id"].astype(str).tolist() if str(x).strip()})
+
+
+
+# ===== Admin UI helpers (reply keyboard) =====
+from telegram import ReplyKeyboardMarkup, KeyboardButton
+
+ADMIN_MENU_BTNS = [
+    [KeyboardButton("Отследить разбор"), KeyboardButton("Админ: Рассылка")],
+    [KeyboardButton("Админ: Заказы"), KeyboardButton("Админ: Адреса")],
+]
+
+ADMIN_BACK_BTN = KeyboardButton("Назад, в админ-панель")
+
+BROADCAST_MENU_BTNS = [
+    [KeyboardButton("Уведомления всем должникам")],
+    [KeyboardButton("Уведомления по ID разбора")],
+    [ADMIN_BACK_BTN],
+]
+
+
+def is_admin_user(user_id:int) -> bool:
+    try:
+        from app.config import ADMIN_IDS  # if exists
+    except Exception:
+        try:
+            from config import ADMIN_IDS
+        except Exception:
+            ADMIN_IDS = []
+    return str(user_id) in {str(x) for x in ADMIN_IDS}
+
+async def show_admin_menu(update, context):
+    kb = ReplyKeyboardMarkup(ADMIN_MENU_BTNS, resize_keyboard=True, one_time_keyboard=False)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Админ-панель: выберите раздел",
+        reply_markup=kb
+    )
+
+async def show_broadcast_menu(update, context):
+    kb = ReplyKeyboardMarkup(BROADCAST_MENU_BTNS, resize_keyboard=True, one_time_keyboard=False)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Раздел «Рассылка»",
+        reply_markup=kb
+    )
+
+# /admin toggles admin menu for admins only
+async def cmd_admin(update, context):
+    if not is_admin_user(update.effective_user.id):
+        return
+    await show_admin_menu(update, context)
+
+# Text router for admin menus
+async def on_admin_text(update, context):
+    if not is_admin_user(update.effective_user.id):
+        return
+    text = (update.message.text or "").strip().lower()
+    if text == "админ: рассылка":
+        return await show_broadcast_menu(update, context)
+    if text in ("назад, в админ-панель", "назад в админ-меню", "назад в админ-панель"):
+        return await show_admin_menu(update, context)
+    if text == "уведомления всем должникам":
+        return await broadcast_all_unpaid(update, context)
+    # "Уведомления по ID разбора" — запускает существующий сценарий вручную
+    if text == "уведомления по id разбора":
+        # Reuse your existing entry point (send a prompt to enter order_id)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Введите номер разбора (order_id), например CN-00000")
+        return
+
+# Mass broadcast: all unpaid across all orders
+async def broadcast_all_unpaid(update, context):
+    from app import sheets  # or relative import
+    try:
+        grouped = sheets.get_all_unpaid_grouped()
+    except Exception:
+        try:
+            import sheets
+            grouped = sheets.get_all_unpaid_grouped()
+        except Exception as e:
+            await context.bot.send_message(update.effective_chat.id, f"Не удалось получить список должников: {e}")
+            return
+    total_orders = len(grouped)
+    total_ok = 0
+    total_fail = 0
+    report_lines = []
+    for order_id, users in grouped.items():
+        unpaid_usernames = [u.lower() for u in users]
+        user_ids = sheets.get_user_ids_by_usernames(unpaid_usernames)
+        ok = 0
+        fail = 0
+        for uid in user_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"Напоминание по доставке: у вас есть неоплаченный разбор {order_id}. Пожалуйста, оплатите."
+                )
+                ok += 1
+            except Exception as e:
+                fail += 1
+        total_ok += ok
+        total_fail += fail
+        report_lines.append(f"{order_id}: ✅ {ok} ❌ {fail}")
+    summary = "\\n".join(["📣 Уведомления всем должникам — итог",
+                          f"Заказов: {total_orders}",
+                          f"Успешно: {total_ok}",
+                          f"Ошибок: {total_fail}",
+                          "",
+                          *report_lines])
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=summary)
+
+
+
+def register_admin_ui(application):
+    from telegram.ext import CommandHandler, MessageHandler, filters
+    application.add_handler(CommandHandler("admin", cmd_admin))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_admin_text))
+
