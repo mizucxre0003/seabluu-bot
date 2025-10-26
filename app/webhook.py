@@ -18,8 +18,6 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
-    # Ничего сетевого (initialize/set_webhook) не делаем на старте,
-    # чтобы не упасть из-за внешних ограничений — ленивая инициализация ниже.
     logger.info("FastAPI started. Waiting for Telegram updates...")
 
 @app.on_event("shutdown")
@@ -35,7 +33,6 @@ async def telegram_webhook(req: Request):
     try:
         data = await req.json()
 
-        # Ленивая инициализация PTB на первом апдейте
         if not getattr(application, "_initialized", False):
             try:
                 await application.initialize()
