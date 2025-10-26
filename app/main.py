@@ -1,5 +1,4 @@
 import logging
-
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -8,7 +7,6 @@ from telegram import (
     KeyboardButton,
 )
 from telegram.ext import (
-    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -16,15 +14,12 @@ from telegram.ext import (
     filters,
 )
 
-from .config import BOT_TOKEN, POLL_MINUTES
 from . import sheets
-from .texts import HELP
-from .statuses import STATUSES
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes
-from .config import ADMIN_IDS
-from . import sheets
-# Единый справочник статусов (можешь править текст как нужно)
+from .config import ADMIN_IDS  # только для проверки прав админа
+
+logging.basicConfig(level=logging.INFO)
+
+# Единый справочник статусов (правь при необходимости)
 STATUSES = [
     "выкуплен",
     "едет на адрес",
@@ -41,9 +36,6 @@ STATUSES = [
     "получен",
 ]
 
-
-logging.basicConfig(level=logging.INFO)
-
 MAIN_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton("Отследить заказ")],
@@ -53,6 +45,9 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+
+# ========= БАЗОВЫЕ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =========
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я бот SEABLUU для отслеживания заказов и адресов. Выберите действие ниже.",
@@ -60,16 +55,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP)
+    await update.message.reply_text(
+        "Команды:\n"
+        "• Отследить заказ — статус по номеру\n"
+        "• Мои адреса — добавить/изменить адрес\n"
+        "• Мои подписки — список подписок на заказы\n"
+        "• /admin — админ-панель (только для админов)"
+    )
+
+
+# ========= ТЕКСТЫ/РЕЖИМЫ =========
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
     text = raw.lower()
 
-        # --- ADMIN FLOW ---
+    # --- ADMIN FLOW (самый верх, чтобы перехватывать шаги админа) ---
     if update.effective_user.id in ADMIN_IDS:
         mode = context.user_data.get("adm_mode")
-        raw = update.message.text.strip()
 
         if mode == "add_order_id":
             context.user_data["adm_buf"] = {"order_id": raw}
@@ -121,7 +124,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "status": buf.get("status", "выкуплен"),
                     "note": buf.get("note", ""),
                 })
-                await update.message.reply_text(f"Заказ *{buf['order_id']}* добавлен ✅", parse_mode="Markdown")
+                await update.message.reply_text(
+                    f"Заказ *{buf['order_id']}* добавлен ✅",
+                    parse_mode="Markdown",
+                )
             except Exception as e:
                 await update.message.reply_text(f"Ошибка: {e}")
             finally:
@@ -152,7 +158,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("adm_mode", None)
             return
 
-    # --- КОМАНДЫ ВСЕГДА В ПРИОРИТЕТЕ ---
+    # --- КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ---
     if text in {"отмена", "cancel"}:
         context.user_data["mode"] = None
         await update.message.reply_text("Ок, отменил. Что дальше?", reply_markup=MAIN_KB)
@@ -160,29 +166,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "отследить заказ":
         context.user_data["mode"] = "track"
-        await update.message.reply_text("Отправьте номер заказа (например: KR-12345):")
+        await update.message.reply_text("Отправьте номер заказа (например: SB-12345):")
         return
 
     if text == "мои адреса":
-        context.user_data["mode"] = None   # <— сбрасываем режим
+        context.user_data["mode"] = None
         await show_addresses(update, context)
         return
 
     if text == "мои подписки":
-        context.user_data["mode"] = None   # <— сбрасываем режим
+        context.user_data["mode"] = None
         await show_subscriptions(update, context)
         return
 
-    # --- РЕЖИМЫ ВВОДА (если не нажаты команды) ---
+    # --- РЕЖИМЫ ВВОДА ---
     mode = context.user_data.get("mode")
 
     if mode == "track":
-        # легкая проверка формата: разрешим и «SB-12345», и просто цифры, и произвольный код
         order_id = raw
-        # если явно похоже на команду, не считаем это номером
-        if text in {"мои адреса", "мои подписки", "отследить заказ"}:
-            await update.message.reply_text("Сначала отправьте номер заказа или нажмите «Отмена».", reply_markup=MAIN_KB)
-            return
         await query_status(update, context, order_id)
         return
 
@@ -213,7 +214,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "add_address_city":
         context.user_data["city"] = raw
         await update.message.reply_text(
-            "Адрес (можно в свободной форме):\nПример: Туран 34А, 6 подъезд, 8 этаж, кв. 12"
+            "Адрес (можно в свободной форме):\nПример: Пушкина 11, 5 подъезд, 3 этаж, кв. 12"
         )
         context.user_data["mode"] = "add_address_address"
         return
@@ -239,6 +240,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ========= БИЗНЕС-ФУНКЦИИ =========
 
 async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
     order = sheets.get_order(order_id)
@@ -249,16 +251,16 @@ async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order
     status = order.get("status") or "статус не указан"
     origin = order.get("origin") or ""
 
-    text = (f"Заказ *{order_id}*\n"
-            f"Статус: *{status}*")
+    txt = f"Заказ *{order_id}*\nСтатус: *{status}*"
     if origin:
-        text += f"\nСтрана/источник: {origin}"
+        txt += f"\nСтрана/источник: {origin}"
 
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")
     ]])
-    await update.message.reply_markdown(text, reply_markup=kb)
+    await update.message.reply_markdown(txt, reply_markup=kb)
     context.user_data["mode"] = None
+
 
 async def show_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     addrs = sheets.list_addresses(update.effective_user.id)
@@ -279,6 +281,7 @@ async def show_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗑 Удалить адрес", callback_data="addr:del")],
     ])
     await update.message.reply_text("Ваш адрес доставки:\n" + "\n".join(lines), reply_markup=kb)
+
 
 async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -301,8 +304,6 @@ async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, reply_markup=MAIN_KB)
 
-    context.user_data["mode"] = None
-    await update.message.reply_text("Адрес сохранён ✅", reply_markup=MAIN_KB)
 
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = sheets.list_subscriptions(update.effective_user.id)
@@ -312,94 +313,10 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     txt = "\n".join([f"• {s['order_id']} (последний статус: {s.get('last_sent_status','—')})" for s in subs])
     await update.message.reply_text("Ваши подписки:\n" + txt)
 
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Единый обработчик нажатий inline-кнопок."""
-    q = update.callback_query
-    await q.answer()
-    data = q.data
 
-    # ===== АДМИН-КНОПКИ (две ветки) =====
-    if data.startswith("adm:pick_status:"):
-        # Выбор стартового статуса при добавлении заказа
-        if update.effective_user.id not in ADMIN_IDS:
-            return
-        status = data.split("adm:pick_status:", 1)[1]
-        context.user_data.setdefault("adm_buf", {})["status"] = status
-        context.user_data["adm_mode"] = "add_order_note"
-        await q.message.reply_text("Примечание (или '-' если нет):")
-        return
+# ========= CALLBACKS (кнопки) =========
 
-    if data.startswith("adm:set_status:"):
-        # Выбор нового статуса при обновлении существующего заказа
-        if update.effective_user.id not in ADMIN_IDS:
-            return
-        status = data.split("adm:set_status:", 1)[1]
-        order_id = context.user_data.get("adm_buf", {}).get("order_id")
-        ok = sheets.update_order_status(order_id, status)
-        if ok:
-            await q.message.reply_text(
-                f"Статус *{order_id}* обновлён на: _{status}_ ✅",
-                parse_mode="Markdown",
-            )
-        else:
-            await q.message.reply_text("Заказ не найден.")
-        # очистим режим
-        context.user_data.pop("adm_mode", None)
-        context.user_data.pop("adm_buf", None)
-        return
-
-    if data.startswith("sub:"):
-        order_id = data.split(":", 1)[1]
-        sheets.subscribe(update.effective_user.id, order_id)
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text("Готово! Буду присылать обновления по этому заказу 🔔")
-    elif data == "addr:add":
-        await query.message.reply_text("Давайте добавим/обновим адрес.\nФИО:")
-        context.user_data["mode"] = "add_address_fullname"
-    elif data == "addr:del":
-        ok = sheets.delete_address(update.effective_user.id)
-        await query.message.reply_text("Адрес удалён." if ok else "Удалять нечего — адреса нет.")
-    else:
-        await query.message.reply_text("Действие не поддерживается.")
-
-async def poll_job(context: ContextTypes.DEFAULT_TYPE):
-    """Периодический опрос таблицы через JobQueue."""
-    try:
-        events = sheets.scan_updates()
-        for e in events:
-            try:
-                await context.bot.send_message(
-                    chat_id=e["user_id"],
-                    text=f"Обновление по заказу {e['order_id']}: {e['new_status']}",
-                )
-            except Exception:
-                pass
-    except Exception as ex:
-        logging.exception("Ошибка в poll_job: %s", ex)
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.exception("Unhandled error", exc_info=context.error)
-
-def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CallbackQueryHandler(on_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    # Планируем фоновые проверки через JobQueue (через 10 сек, затем каждые POLL_MINUTES минут)
-    application.job_queue.run_repeating(poll_job, interval=60 * POLL_MINUTES, first=10)
-
-    # Ловим исключения, чтобы не падало
-    application.add_error_handler(error_handler)
-
-    logging.info("Bot started. Waiting for messages...")
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
-    def admin_kb():
+def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Добавить заказ", callback_data="adm:add")],
         [InlineKeyboardButton("✏️ Изменить статус", callback_data="adm:update")],
@@ -416,13 +333,14 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data.pop("adm_mode", None)
     context.user_data.pop("adm_buf", None)
-async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Единый обработчик нажатий inline-кнопок."""
     q = update.callback_query
     await q.answer()
     data = q.data
 
+    # --- админ-меню (вход/навигация) ---
     if data == "adm:back":
         context.user_data.pop("adm_mode", None)
         context.user_data.pop("adm_buf", None)
@@ -430,27 +348,87 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "adm:add":
-        context.user_data["adm_mode"] = "add_order_id"
-        context.user_data["adm_buf"] = {}
-        await q.message.reply_text("Введи *order_id* (например: SB-12345):", parse_mode="Markdown")
+        if update.effective_user.id in ADMIN_IDS:
+            context.user_data["adm_mode"] = "add_order_id"
+            context.user_data["adm_buf"] = {}
+            await q.message.reply_text("Введи *order_id* (например: SB-12345):", parse_mode="Markdown")
         return
 
     if data == "adm:update":
-        context.user_data["adm_mode"] = "upd_order_id"
-        await q.message.reply_text("Введи *order_id* для изменения статуса:", parse_mode="Markdown")
+        if update.effective_user.id in ADMIN_IDS:
+            context.user_data["adm_mode"] = "upd_order_id"
+            await q.message.reply_text("Введи *order_id* для изменения статуса:", parse_mode="Markdown")
         return
 
     if data == "adm:list":
-        orders = sheets.list_recent_orders(10)
-        if not orders:
-            await q.message.reply_text("Список пуст.")
-        else:
-            txt = "\n".join([f"• {o.get('order_id')} — {o.get('status','')}" for o in orders])
-            await q.message.reply_text(f"*Последние заказы:*\n{txt}", parse_mode="Markdown")
+        if update.effective_user.id in ADMIN_IDS:
+            orders = sheets.list_recent_orders(10)
+            if not orders:
+                await q.message.reply_text("Список пуст.")
+            else:
+                txt = "\n".join([f"• {o.get('order_id')} — {o.get('status','')}" for o in orders])
+                await q.message.reply_text(f"*Последние заказы:*\n{txt}", parse_mode="Markdown")
         return
 
     if data == "adm:find":
-        context.user_data["adm_mode"] = "find_order"
-        await q.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
+        if update.effective_user.id in ADMIN_IDS:
+            context.user_data["adm_mode"] = "find_order"
+            await q.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
         return
 
+    # --- выбор статуса (админ) ---
+    if data.startswith("adm:pick_status:"):
+        if update.effective_user.id not in ADMIN_IDS:
+            return
+        status = data.split("adm:pick_status:", 1)[1]
+        context.user_data.setdefault("adm_buf", {})["status"] = status
+        context.user_data["adm_mode"] = "add_order_note"
+        await q.message.reply_text("Примечание (или '-' если нет):")
+        return
+
+    if data.startswith("adm:set_status:"):
+        if update.effective_user.id not in ADMIN_IDS:
+            return
+        status = data.split("adm:set_status:", 1)[1]
+        order_id = context.user_data.get("adm_buf", {}).get("order_id")
+        ok = sheets.update_order_status(order_id, status)
+        if ok:
+            await q.message.reply_text(
+                f"Статус *{order_id}* обновлён на: _{status}_ ✅",
+                parse_mode="Markdown",
+            )
+        else:
+            await q.message.reply_text("Заказ не найден.")
+        context.user_data.pop("adm_mode", None)
+        context.user_data.pop("adm_buf", None)
+        return
+
+    # --- пользовательские кнопки ---
+    if data.startswith("sub:"):
+        order_id = data.split(":", 1)[1]
+        sheets.subscribe(update.effective_user.id, order_id)
+        await q.edit_message_reply_markup(reply_markup=None)
+        await q.message.reply_text("Готово! Буду присылать обновления по этому заказу 🔔")
+        return
+
+    if data == "addr:add":
+        await q.message.reply_text("Давайте добавим/обновим адрес.\nФИО:")
+        context.user_data["mode"] = "add_address_fullname"
+        return
+
+    if data == "addr:del":
+        ok = sheets.delete_address(update.effective_user.id)
+        await q.message.reply_text("Адрес удалён." if ok else "Удалять нечего — адреса нет.")
+        return
+
+    await q.message.reply_text("Действие не поддерживается.")
+
+
+# ========= Регистрация хендлеров (используется в webhook.py) =========
+
+def register_handlers(application):
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
