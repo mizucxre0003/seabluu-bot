@@ -26,14 +26,14 @@ def get_worksheet(name: str):
     try:
         return sh.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:
-        # создаём лист с базовыми заголовками
         if name == "orders":
             ws = sh.add_worksheet(title="orders", rows=1000, cols=20)
             ws.append_row(["order_id","client_name","phone","origin","status","note","country","updated_at"])
             return ws
         if name == "addresses":
             ws = sh.add_worksheet(title="addresses", rows=1000, cols=20)
-            ws.append_row(["user_id","full_name","phone","city","address","postcode","created_at","updated_at"])
+            # сразу создаём колонку username
+            ws.append_row(["user_id","username","full_name","phone","city","address","postcode","created_at","updated_at"])
             return ws
         if name == "subscriptions":
             ws = sh.add_worksheet(title="subscriptions", rows=1000, cols=20)
@@ -45,21 +45,41 @@ def df_from_ws(ws) -> pd.DataFrame:
     vals = ws.get_all_records()
     return pd.DataFrame(vals)
 
+# ======== helpers ========
+def _ensure_addresses_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Гарантируем наличие колонок, включая username (на старых листах её могло не быть)."""
+    need = ["user_id","username","full_name","phone","city","address","postcode","created_at","updated_at"]
+    if df.empty:
+        return pd.DataFrame(columns=need)
+    for c in need:
+        if c not in df.columns:
+            df[c] = ""
+    return df[need]
+
+def _now_iso() -> str:
+    return pd.Timestamp.utcnow().isoformat()
+
 # ======== addresses ========
-def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str, postcode:str):
+def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str, postcode:str, username:str|None=""):
     ws = get_worksheet("addresses")
-    df = df_from_ws(ws)
-    now = pd.Timestamp.utcnow().isoformat()
+    df_raw = df_from_ws(ws)
+    df = _ensure_addresses_columns(df_raw)
+    now = _now_iso()
+    uname = (username or "").lstrip("@")
+
     if not df.empty:
         mask = df["user_id"] == user_id
         if mask.any():
             idx = df.index[mask][0]
-            df.loc[idx, ["full_name","phone","city","address","postcode","updated_at"]] = [full_name,phone,city,address,postcode,now]
+            df.loc[idx, ["username","full_name","phone","city","address","postcode","updated_at"]] = [
+                uname, full_name, phone, city, address, postcode, now
+            ]
         else:
-            df.loc[len(df)] = [user_id,full_name,phone,city,address,postcode,now,now]
+            df.loc[len(df)] = [user_id, uname, full_name, phone, city, address, postcode, now, now]
     else:
         df = pd.DataFrame([{
             "user_id": user_id,
+            "username": uname,
             "full_name": full_name,
             "phone": phone,
             "city": city,
@@ -68,29 +88,43 @@ def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str,
             "created_at": now,
             "updated_at": now,
         }])
+
     ws.clear(); ws.append_row(list(df.columns)); ws.append_rows(df.values.tolist())
 
 def list_addresses(user_id:int):
     ws = get_worksheet("addresses")
-    df = df_from_ws(ws)
+    df = _ensure_addresses_columns(df_from_ws(ws))
     if df.empty: 
         return []
     return df[df["user_id"]==user_id].to_dict("records")
 
 def delete_address(user_id:int):
     ws = get_worksheet("addresses")
-    df = df_from_ws(ws)
+    df = _ensure_addresses_columns(df_from_ws(ws))
     if df.empty:
         return False
     df = df[df["user_id"]!=user_id]
     ws.clear()
     if df.empty:
-        ws.append_row(["user_id","full_name","phone","city","address","postcode","created_at","updated_at"])
+        ws.append_row(["user_id","username","full_name","phone","city","address","postcode","created_at","updated_at"])
     else:
         ws.append_row(list(df.columns)); ws.append_rows(df.values.tolist())
     return True
 
-# ======== orders & subscriptions ========
+def get_addresses_by_usernames(usernames: list[str]) -> list[dict]:
+    """Вернёт записи по списку username'ов (без @), регистр игнорируется."""
+    usernames = [u.lstrip("@").strip().lower() for u in usernames if u.strip()]
+    if not usernames:
+        return []
+    ws = get_worksheet("addresses")
+    df = _ensure_addresses_columns(df_from_ws(ws))
+    if df.empty:
+        return []
+    df["__u"] = df["username"].astype(str).str.lower()
+    res = df[df["__u"].isin(usernames)].drop(columns=["__u"])
+    return res.to_dict("records")
+
+# ======== orders & subscriptions (без изменений по смыслу) ========
 
 def get_order(order_id:str):
     ws = get_worksheet("orders")
@@ -105,8 +139,7 @@ def get_order(order_id:str):
 def subscribe(user_id:int, order_id:str):
     ws = get_worksheet("subscriptions")
     df = df_from_ws(ws)
-    now = pd.Timestamp.utcnow().isoformat()
-    # текущий статус, чтобы не слать «старое»
+    now = _now_iso()
     order = get_order(order_id)
     last = order.get("status") if order else ""
     if df.empty:
@@ -162,14 +195,11 @@ def set_last_sent_status(user_id:int, order_id:str, new_status:str):
     mask = (df["user_id"]==user_id) & (df["order_id"].astype(str)==str(order_id))
     if not mask.any():
         return
-    now = pd.Timestamp.utcnow().isoformat()
+    now = _now_iso()
     df.loc[df.index[mask], ["last_sent_status","updated_at"]] = [new_status, now]
     ws.clear(); ws.append_row(list(df.columns)); ws.append_rows(df.values.tolist())
 
 def scan_updates():
-    """Сравнивает статусы и возвращает список уведомлений к отправке:
-       [{user_id, order_id, new_status}] и одновременно обновляет last_sent_status.
-    """
     ws_sub = get_worksheet("subscriptions")
     ws_ord = get_worksheet("orders")
     df_sub = df_from_ws(ws_sub)
@@ -177,7 +207,7 @@ def scan_updates():
     if df_sub.empty or df_ord.empty: 
         return []
 
-    now = pd.Timestamp.utcnow().isoformat()
+    now = _now_iso()
     merged = df_sub.merge(df_ord[["order_id","status"]], how="left", on="order_id")
     to_send = []
     for i, row in merged.iterrows():
@@ -241,7 +271,7 @@ def update_order_status(order_id: str, new_status: str) -> bool:
     if "updated_at" in df.columns:
         df.loc[hit, "updated_at"] = now_ts()
     if "last_update" in df.columns:
-        df.loc[hit, "last_update"] = pd.Timestamp.utcnow().isoformat()
+        df.loc[hit, "last_update"] = _now_iso()
     ws.clear()
     ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
     return True
