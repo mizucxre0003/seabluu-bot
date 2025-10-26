@@ -1,7 +1,7 @@
 # app/main.py
 import logging
 import re
-from typing import List
+from typing import List, Tuple
 
 from telegram import (
     Update,
@@ -27,22 +27,12 @@ logger = logging.getLogger(__name__)
 # ---------------------- Константы и утилиты ----------------------
 
 STATUSES = [
-    "выкуплен",
-    "едет на адрес",
-    "приехал на адрес (Китай)",
-    "приехал на адрес (Корея)",
-    "ожидает отправку в Казахстан",
-    "отправлен в Казахстан (из Китая)",
-    "отправлен в Казахстан (из Кореи)",
-    "приехал к владельцу шопа в Астане",
-    "сборка заказа по Казахстану",
-    "собран и готов на доставку по Казахстану",
-    "отправлен по Казахстану",
-    "доставлен",
-    "получен",
+    "выкуплен", "едет на адрес", "приехал на адрес (Китай)", "приехал на адрес (Корея)",
+    "ожидает отправку в Казахстан", "отправлен в Казахстан (из Китая)", "отправлен в Казахстан (из Кореи)",
+    "приехал к владельцу шопа в Астане", "сборка заказа по Казахстану",
+    "собран и готов на доставку по Казахстану", "отправлен по Казахстану", "доставлен", "получен",
     "доставка не оплачена",
 ]
-UNPAID_STATUS = "доставка не оплачена"
 
 ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—]?\s?(\d{3,})", re.IGNORECASE)
 USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{5,})")
@@ -58,20 +48,10 @@ def extract_order_id(s: str) -> str | None:
 def is_valid_status(s: str, statuses: list[str]) -> bool:
     return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
 
-def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
-    rows, row = [], []
-    for i, s in enumerate(STATUSES):
-        row.append(InlineKeyboardButton(s, callback_data=f"adm:pick_status_id:{i}"))
-        if len(row) == cols:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
-
 def _is_admin(uid) -> bool:
     return uid in ADMIN_IDS or str(uid) in {str(x) for x in ADMIN_IDS}
 
-# ---------------------- Клиентская клавиатура ----------------------
+# ---------------------- Клавиатуры ----------------------
 
 MAIN_KB = ReplyKeyboardMarkup(
     [
@@ -81,8 +61,6 @@ MAIN_KB = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
-# ---------------------- Админ-клавиатуры ----------------------
 
 ADMIN_MENU_KB = ReplyKeyboardMarkup(
     [
@@ -102,16 +80,51 @@ BROADCAST_MENU_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# Эти ключевые слова клиентский роутер игнорирует для админов
-ADMIN_TEXT_KEYS = {
-    "добавить разбор",
-    "админ: рассылка",
-    "уведомления всем должникам",
-    "уведомления по id разбора",
-    "назад, в админ-панель",
-    "админ: адреса",
-    "выйти из админ-панели",
-}
+def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for i, s in enumerate(STATUSES):
+        row.append(InlineKeyboardButton(s, callback_data=f"adm:pick_status_id:{i}"))
+        if len(row) == cols:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+# ------- participants UI -------
+
+def _slice_page(items: List, page: int, per_page: int) -> Tuple[List, int]:
+    total_pages = max(1, (len(items) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    return items[start:start + per_page], total_pages
+
+def build_participants_text(order_id: str, participants: List[dict], page: int, per_page: int) -> str:
+    slice_, total_pages = _slice_page(participants, page, per_page)
+    lines = [f"*Разбор* `{order_id}` — участники ({page+1}/{total_pages}):"]
+    if not slice_:
+        lines.append("_Список участников пуст._")
+    for p in slice_:
+        mark = "✅" if p["paid"] else "❌"
+        lines.append(f"{mark} @{p['username']}")
+    return "\n".join(lines)
+
+def build_participants_kb(order_id: str, participants: List[dict], page: int, per_page: int) -> InlineKeyboardMarkup:
+    slice_, total_pages = _slice_page(participants, page, per_page)
+    rows = []
+    for p in slice_:
+        mark = "✅" if p["paid"] else "❌"
+        rows.append([
+            InlineKeyboardButton(f"{mark} @{p['username']}", callback_data=f"pp:toggle:{order_id}:{p['username']}")
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("« Назад", callback_data=f"pp:page:{order_id}:{page-1}"))
+    nav.append(InlineKeyboardButton("Обновить", callback_data=f"pp:refresh:{order_id}:{page}"))
+    if (page + 1) * per_page < len(participants):
+        nav.append(InlineKeyboardButton("Вперёд »", callback_data=f"pp:page:{order_id}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(rows)
 
 # ---------------------- Команды ----------------------
 
@@ -133,7 +146,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    # сбрасываем любые незавершённые админ-потоки
     for k in ("adm_mode", "adm_buf", "awaiting_unpaid_order_id"):
         context.user_data.pop(k, None)
     await (update.message or update.callback_query.message).reply_text(
@@ -146,11 +158,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
     text = raw.lower()
 
-    # ===== ADMIN FLOW (кнопки снизу) =====
+    # ===== ADMIN FLOW =====
     if _is_admin(update.effective_user.id):
-        # маршрутизация по админ-кнопкам
+
         if text == "выйти из админ-панели":
-            # вернуть клиентскую клавиатуру и очистить состояние
             context.user_data.clear()
             await update.message.reply_text("Ок, вышли из админ-панели.", reply_markup=MAIN_KB)
             return
@@ -184,13 +195,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пришли @username или несколько через пробел/запятую/новую строку.")
             return
 
-        # если админ нажал «Отследить разбор» в админ-панели — хотим ПОЛНУЮ карточку
         if text == "отследить разбор" and (context.user_data.get("adm_mode") is None):
             context.user_data["adm_mode"] = "find_order"
             await update.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
             return
 
-        # ----- ветки мастеров/режимов -----
+        # --- ветки мастеров ---
         a_mode = context.user_data.get("adm_mode")
 
         # Добавление заказа
@@ -235,7 +245,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf = context.user_data.get("adm_buf", {})
             buf["note"] = raw if raw != "-" else ""
             try:
-                # 1) добавим заказ
                 sheets.add_order(
                     {
                         "order_id": buf["order_id"],
@@ -245,13 +254,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "note": buf.get("note", ""),
                     }
                 )
-                # 2) синхронизируем участников из client_name -> participants
+                # участники из client_name
                 usernames = [m.group(1) for m in USERNAME_RE.finditer(buf.get("client_name", ""))]
                 if usernames:
                     sheets.ensure_participants(buf["order_id"], usernames)
-                await update.message.reply_text(
-                    f"Заказ *{buf['order_id']}* добавлен ✅", parse_mode="Markdown"
-                )
+                await update.message.reply_text(f"Заказ *{buf['order_id']}* добавлен ✅", parse_mode="Markdown")
             except Exception as e:
                 await update.message.reply_text(f"Ошибка: {e}")
             finally:
@@ -259,7 +266,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data.pop(k, None)
             return
 
-        # Поиск полной карточки заказа
+        # Поиск полной карточки заказа + управление оплатами
         if a_mode == "find_order":
             parsed_id = extract_order_id(raw) or raw
             order = sheets.get_order(parsed_id)
@@ -268,6 +275,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("adm_mode", None)
                 return
 
+            # карточка
             order_id = order.get("order_id", parsed_id)
             client_name = order.get("client_name", "—")
             status = order.get("status", "—")
@@ -276,7 +284,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             origin = order.get("origin")
             updated_at = order.get("updated_at")
 
-            lines = [
+            head = [
                 f"*order_id:* `{order_id}`",
                 f"*client_name:* {client_name}",
                 f"*status:* {status}",
@@ -284,11 +292,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"*country:* {country}",
             ]
             if origin and origin != country:
-                lines.append(f"*origin:* {origin}")
+                head.append(f"*origin:* {origin}")
             if updated_at:
-                lines.append(f"*updated_at:* {updated_at}")
+                head.append(f"*updated_at:* {updated_at}")
+            head_text = "\n".join(head)
 
-            await update.message.reply_markdown("\n".join(lines))
+            # участники
+            participants = sheets.get_participants(order_id)
+            page = 0
+            per_page = 8
+            part_text = build_participants_text(order_id, participants, page, per_page)
+            kb = build_participants_kb(order_id, participants, page, per_page)
+
+            await update.message.reply_markdown(head_text)
+            await update.message.reply_markdown(part_text, reply_markup=kb)
             context.user_data.pop("adm_mode", None)
             return
 
@@ -356,49 +373,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query_status(update, context, raw)
         return
 
-    # Мастер адреса (как раньше)
-    if mode == "add_address_fullname":
-        context.user_data["full_name"] = raw
-        await update.message.reply_text("Телефон (пример: 87001234567):")
-        context.user_data["mode"] = "add_address_phone"
-        return
-
-    if mode == "add_address_phone":
-        normalized = raw.strip().replace(" ", "").replace("-", "")
-        if normalized.startswith("+7"): normalized = "8" + normalized[2:]
-        elif normalized.startswith("7"): normalized = "8" + normalized[1:]
-        if not (normalized.isdigit() and len(normalized) == 11 and normalized.startswith("8")):
-            await update.message.reply_text(
-                "Нужно 11 цифр и обязательно с 8. Пример: 87001234567\n"
-                "Введи номер ещё раз или нажми «Отмена»:"
-            )
-            return
-        context.user_data["phone"] = normalized
-        await update.message.reply_text("Город (пример: Астана):")
-        context.user_data["mode"] = "add_address_city"
-        return
-
-    if mode == "add_address_city":
-        context.user_data["city"] = raw
-        await update.message.reply_text("Адрес (свободный формат):")
-        context.user_data["mode"] = "add_address_address"
-        return
-
-    if mode == "add_address_address":
-        context.user_data["address"] = raw
-        await update.message.reply_text("Почтовый индекс (пример: 010000):")
-        context.user_data["mode"] = "add_address_postcode"
-        return
-
-    if mode == "add_address_postcode":
-        if not (raw.isdigit() and 5 <= len(raw) <= 6):
-            await update.message.reply_text("Индекс выглядит странно. Пример: 010000\nВведи индекс ещё раз или нажми «Отмена».")
-            return
-        context.user_data["postcode"] = raw
-        await save_address(update, context)
-        return
-
-    # Ничего не подошло
     await update.message.reply_text(
         "Не понял. Нажмите кнопку ниже или введите номер заказа. Для выхода — «Отмена».",
         reply_markup=MAIN_KB,
@@ -445,41 +419,6 @@ async def show_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     )
     await update.message.reply_text("Ваш адрес доставки:\n" + "\n".join(lines), reply_markup=kb)
-
-async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    sheets.upsert_address(
-        user_id=u.id,
-        username=u.username or "",
-        full_name=context.user_data.get("full_name", ""),
-        phone=context.user_data.get("phone", ""),
-        city=context.user_data.get("city", ""),
-        address=context.user_data.get("address", ""),
-        postcode=context.user_data.get("postcode", ""),
-    )
-    # автоподписка по username
-    try:
-        username = (u.username or "").strip()
-        if username:
-            rel_orders = sheets.find_orders_for_username(username)
-            for oid in rel_orders:
-                try:
-                    sheets.subscribe(u.id, oid)
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.warning(f"auto-subscribe on address save failed: {e}")
-
-    context.user_data["mode"] = None
-    msg = (
-        "Адрес сохранён ✅\n\n"
-        f"ФИО: {context.user_data.get('full_name','')}\n"
-        f"Телефон: {context.user_data.get('phone','')}\n"
-        f"Город: {context.user_data.get('city','')}\n"
-        f"Адрес: {context.user_data.get('address','')}\n"
-        f"Индекс: {context.user_data.get('postcode','')}"
-    )
-    await update.message.reply_text(msg, reply_markup=MAIN_KB)
 
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = sheets.list_subscriptions(update.effective_user.id)
@@ -602,14 +541,57 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("unsub:"):
         order_id = data.split(":", 1)[1]
-        ok = sheets.unsubscribe(update.effective_user.id, order_id)
-        await q.message.reply_text("Отписка выполнена." if ok else "Вы и так не были подписаны.")
+        sheets.unsubscribe(update.effective_user.id, order_id)
+        await q.message.reply_text("Отписка выполнена.")
         try:
             await q.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")]])
             )
         except Exception:
             pass
+        return
+
+    # ---- управление оплатой участников ----
+    if data.startswith("pp:toggle:"):
+        # pp:toggle:{order_id}:{username}
+        _, _, order_id, username = data.split(":", 3)
+        sheets.toggle_participant_paid(order_id, username)
+        # обновить список
+        participants = sheets.get_participants(order_id)
+        # текущая страница из подписи сообщения (передаем в refresh ниже), попробуем получить из data в кнопке 'refresh'
+        # упростим: всегда рисуем с page=0
+        page = 0
+        per_page = 8
+        txt = build_participants_text(order_id, participants, page, per_page)
+        kb = build_participants_kb(order_id, participants, page, per_page)
+        try:
+            await q.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
+        except Exception:
+            # если не удалось отредактировать (например, слишком старое сообщение) — просто отправим новое
+            await q.message.reply_markdown(txt, reply_markup=kb)
+        return
+
+    if data.startswith("pp:refresh:"):
+        # pp:refresh:{order_id}:{page}
+        parts = data.split(":")
+        order_id = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
+        participants = sheets.get_participants(order_id)
+        per_page = 8
+        txt = build_participants_text(order_id, participants, page, per_page)
+        kb = build_participants_kb(order_id, participants, page, per_page)
+        await q.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    if data.startswith("pp:page:"):
+        # pp:page:{order_id}:{page}
+        _, _, order_id, page_s = data.split(":")
+        page = int(page_s)
+        participants = sheets.get_participants(order_id)
+        per_page = 8
+        txt = build_participants_text(order_id, participants, page, per_page)
+        kb = build_participants_kb(order_id, participants, page, per_page)
+        await q.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
         return
 
 # ---------------------- Регистрация ----------------------
@@ -619,12 +601,8 @@ def register_handlers(application):
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CallbackQueryHandler(on_callback))
-    # ВАЖНО: только один текстовый хэндлер, чтобы не было дублей
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
 def register_admin_ui(application):
-    """
-    Ничего не регистрируем, чтобы не дублировать handle_text.
-    Вебхук спокойно может вызывать эту функцию — она no-op.
-    """
+    # no-op: всё обрабатывает handle_text
     return
