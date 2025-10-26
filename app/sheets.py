@@ -28,16 +28,20 @@ def get_worksheet(name: str):
         return sh.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:
         if name == "orders":
-            ws = sh.add_worksheet(title="orders", rows=1000, cols=20)
+            ws = sh.add_worksheet(title="orders", rows=2000, cols=20)
             ws.append_row(["order_id","client_name","phone","origin","status","note","country","updated_at"])
             return ws
         if name == "addresses":
-            ws = sh.add_worksheet(title="addresses", rows=1000, cols=20)
+            ws = sh.add_worksheet(title="addresses", rows=2000, cols=20)
             ws.append_row(["user_id","username","full_name","phone","city","address","postcode","created_at","updated_at"])
             return ws
         if name == "subscriptions":
-            ws = sh.add_worksheet(title="subscriptions", rows=1000, cols=20)
+            ws = sh.add_worksheet(title="subscriptions", rows=2000, cols=20)
             ws.append_row(["user_id","order_id","last_sent_status","created_at","updated_at"])
+            return ws
+        if name == "participants":
+            ws = sh.add_worksheet(title="participants", rows=2000, cols=20)
+            ws.append_row(["order_id","username","paid","qty","created_at","updated_at"])
             return ws
         raise
 
@@ -57,6 +61,10 @@ def _ensure_addresses_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _now_iso() -> str:
     return pd.Timestamp.utcnow().isoformat()
+
+def _now_h() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 # ======== addresses ========
 def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str, postcode:str, username:str|None=""):
@@ -123,9 +131,6 @@ def get_addresses_by_usernames(usernames: list[str]) -> list[dict]:
     return res.to_dict("records")
 
 def get_user_ids_by_usernames(usernames: list[str]) -> list[int]:
-    """
-    Ищет user_id в листе 'addresses' по списку username (без @), регистр игнорируется.
-    """
     recs = get_addresses_by_usernames(usernames)
     ids = []
     for r in recs:
@@ -133,7 +138,6 @@ def get_user_ids_by_usernames(usernames: list[str]) -> list[int]:
             ids.append(int(r.get("user_id")))
         except Exception:
             pass
-    # уникальные
     return list({i for i in ids})
 
 # ======== orders & subscriptions ========
@@ -147,6 +151,68 @@ def get_order(order_id:str):
     if row.empty:
         return None
     return row.to_dict("records")[0]
+
+def add_order(record: dict) -> None:
+    ws = get_worksheet("orders")
+    df = df_from_ws(ws)
+    now = _now_h()
+
+    if not df.empty and (df["order_id"].astype(str) == str(record["order_id"])).any():
+        raise ValueError("Такой order_id уже существует")
+
+    row = {
+        "order_id": str(record["order_id"]),
+        "client_name": record.get("client_name",""),
+        "phone": record.get("phone",""),
+        "origin": record.get("origin",""),
+        "status": record.get("status","выкуплен"),
+        "note": record.get("note",""),
+        "country": (record.get("country","") or "").upper(),
+        "updated_at": now,
+    }
+
+    if df.empty:
+        df = pd.DataFrame([row])
+    else:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+    ws.clear()
+    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+
+def update_order_status(order_id: str, new_status: str) -> bool:
+    ws = get_worksheet("orders")
+    df = df_from_ws(ws)
+    if df.empty:
+        return False
+    hit = (df["order_id"].astype(str) == str(order_id))
+    if not hit.any():
+        return False
+    df.loc[hit, "status"] = new_status
+    if "updated_at" in df.columns:
+        df.loc[hit, "updated_at"] = _now_h()
+    ws.clear()
+    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+    return True
+
+def list_recent_orders(limit: int = 10) -> list[dict]:
+    ws = get_worksheet("orders")
+    df = df_from_ws(ws)
+    if df.empty:
+        return []
+    sort_col = "updated_at" if "updated_at" in df.columns else None
+    if sort_col:
+        df = df.sort_values(sort_col, ascending=False)
+    return df.head(limit).fillna("").to_dict(orient="records")
+
+def list_orders_by_status(status: str) -> list[dict]:
+    ws = get_worksheet("orders")
+    df = df_from_ws(ws)
+    if df.empty:
+        return []
+    mask = df["status"].astype(str).str.strip().str.lower() == str(status or "").strip().lower()
+    return df[mask].fillna("").to_dict(orient="records")
+
+# ======== subscriptions ========
 
 def subscribe(user_id:int, order_id:str):
     ws = get_worksheet("subscriptions")
@@ -218,7 +284,6 @@ def scan_updates():
     df_ord = df_from_ws(ws_ord)
     if df_sub.empty or df_ord.empty: 
         return []
-
     now = _now_iso()
     merged = df_sub.merge(df_ord[["order_id","status"]], how="left", on="order_id")
     to_send = []
@@ -228,101 +293,86 @@ def scan_updates():
         if cur and cur != last:
             to_send.append({"user_id": int(row["user_id"]), "order_id": str(row["order_id"]), "new_status": cur})
             df_sub.loc[df_sub.index[i], ["last_sent_status","updated_at"]] = [cur, now]
-
     ws_sub.clear(); ws_sub.append_row(list(df_sub.columns)); ws_sub.append_rows(df_sub.values.tolist())
     return to_send
 
-# ---------- ADMIN HELPERS ----------
+# ======== participants (разборы) ========
 
-ADMIN_ORDERS_WS = "orders"
-
-def now_ts() -> str:
-    from datetime import datetime
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-def _ensure_order_columns(df: pd.DataFrame) -> pd.DataFrame:
-    base_cols = ["order_id","client_name","phone","origin","status","note","country","updated_at"]
+def _participants_df() -> pd.DataFrame:
+    ws = get_worksheet("participants")
+    df = df_from_ws(ws)
     if df.empty:
-        return pd.DataFrame(columns=base_cols)
-    for c in base_cols:
+        return pd.DataFrame(columns=["order_id","username","paid","qty","created_at","updated_at"])
+    for c in ["order_id","username","paid","qty","created_at","updated_at"]:
         if c not in df.columns:
             df[c] = ""
     return df
 
-def add_order(record: dict) -> None:
-    ws = get_worksheet(ADMIN_ORDERS_WS)
-    df = _ensure_order_columns(df_from_ws(ws))
+def ensure_participants(order_id: str, usernames: list[str]) -> None:
+    """Добавляет в participants отсутствующих @user из списка (paid = FALSE). username сохраняем без @, в нижнем регистре."""
+    usernames = [u.lstrip("@").strip().lower() for u in usernames if u.strip()]
+    if not usernames:
+        return
+    ws = get_worksheet("participants")
+    df = _participants_df()
+    now = _now_h()
+    exist_mask = (df["order_id"].astype(str) == str(order_id))
+    existing = set(df[exist_mask]["username"].astype(str).str.lower().tolist()) if not df.empty else set()
 
-    if (df["order_id"].astype(str) == str(record["order_id"])).any():
-        raise ValueError("Такой order_id уже существует")
+    for u in usernames:
+        if u not in existing:
+            df.loc[len(df)] = [str(order_id), u, "FALSE", "", now, now]
 
-    row = {
-        "order_id": str(record["order_id"]),
-        "client_name": record.get("client_name",""),
-        "phone": record.get("phone",""),
-        "origin": record.get("origin",""),
-        "status": record.get("status","выкуплен"),
-        "note": record.get("note",""),
-        "country": record.get("country","").upper(),
-        "updated_at": now_ts(),
-    }
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    ws.clear(); ws.append_row(list(df.columns)); ws.append_rows(df.fillna("").values.tolist())
 
-    ws.clear()
-    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+def get_participants(order_id: str) -> list[dict]:
+    df = _participants_df()
+    if df.empty:
+        return []
+    res = df[df["order_id"].astype(str) == str(order_id)].copy()
+    return res.fillna("").to_dict("records")
 
-def update_order_status(order_id: str, new_status: str) -> bool:
-    ws = get_worksheet(ADMIN_ORDERS_WS)
-    df = df_from_ws(ws)
+def set_participant_paid(order_id: str, username: str, paid: bool) -> bool:
+    ws = get_worksheet("participants")
+    df = _participants_df()
     if df.empty:
         return False
-    hit = (df["order_id"].astype(str) == str(order_id))
-    if not hit.any():
+    uname = username.lstrip("@").strip().lower()
+    mask = (df["order_id"].astype(str) == str(order_id)) & (df["username"].astype(str).str.lower() == uname)
+    if not mask.any():
         return False
-    df.loc[hit, "status"] = new_status
-    if "updated_at" in df.columns:
-        df.loc[hit, "updated_at"] = now_ts()
-    if "last_update" in df.columns:
-        df.loc[hit, "last_update"] = _now_iso()
-    ws.clear()
-    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+    df.loc[mask, ["paid","updated_at"]] = ["TRUE" if paid else "FALSE", _now_h()]
+    ws.clear(); ws.append_row(list(df.columns)); ws.append_rows(df.fillna("").values.tolist())
     return True
 
-def list_recent_orders(limit: int = 10) -> list[dict]:
-    ws = get_worksheet(ADMIN_ORDERS_WS)
-    df = df_from_ws(ws)
+def toggle_participant_paid(order_id: str, username: str) -> bool:
+    df = _participants_df()
     if df.empty:
-        return []
-    sort_col = "updated_at" if "updated_at" in df.columns else ("last_update" if "last_update" in df.columns else None)
-    if sort_col:
-        df = df.sort_values(sort_col, ascending=False)
-    return df.head(limit).fillna("").to_dict(orient="records")
+        return False
+    uname = username.lstrip("@").strip().lower()
+    mask = (df["order_id"].astype(str) == str(order_id)) & (df["username"].astype(str).str.lower() == uname)
+    if not mask.any():
+        return False
+    cur = str(df.loc[mask, "paid"].iloc[0]).strip().lower() in {"true","1","yes","y"}
+    return set_participant_paid(order_id, username, not cur)
 
-def list_orders_by_status(status: str) -> list[dict]:
-    """
-    Вернёт заказы с нужным статусом (используем для ежедневной рассылки unpaid).
-    """
-    ws = get_worksheet(ADMIN_ORDERS_WS)
-    df = df_from_ws(ws)
+def get_unpaid_usernames(order_id: str) -> list[str]:
+    df = _participants_df()
     if df.empty:
         return []
-    mask = df["status"].astype(str).str.strip().str.lower() == str(status or "").strip().lower()
-    return df[mask].fillna("").to_dict(orient="records")
+    mask = (df["order_id"].astype(str) == str(order_id)) & ~(df["paid"].astype(str).str.strip().str.lower().isin(["true","1","yes","y"]))
+    res = df[mask]["username"].astype(str).str.strip().tolist()
+    return [u for u in res if u]
 
 def find_orders_for_username(username: str) -> list[str]:
-    """
-    Возвращает order_id всех заказов из 'orders', где в note присутствует @username (для автоподписки).
-    """
+    """Заказы, где пользователь есть в participants."""
     if not username:
         return []
-    uname = username.strip().lstrip("@")
+    uname = username.strip().lstrip("@").lower()
     if not uname:
         return []
-
-    ws = get_worksheet("orders")
-    df = df_from_ws(ws)
+    df = _participants_df()
     if df.empty:
         return []
-    pattern = re.compile(rf"@{re.escape(uname)}\b", re.IGNORECASE)
-    hits = df[df["note"].astype(str).str.contains(pattern)].copy()
-    return list({str(x) for x in hits["order_id"].astype(str).tolist() if str(x).strip()})
+    mask = df["username"].astype(str).str.lower() == uname
+    return list({str(x) for x in df[mask]["order_id"].astype(str).tolist() if str(x).strip()})
