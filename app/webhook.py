@@ -28,8 +28,10 @@ async def _bg_loop():
     while True:
         try:
             to_send = sheets.scan_updates()
+            logger.info("[bg] subscriptions delta: %d", len(to_send))
             for item in to_send:
                 try:
+                    logger.info("[bg] sending update to user_id=%s order=%s", item.get("user_id"), item.get("order_id"))
                     await application.bot.send_message(
                         chat_id=int(item["user_id"]),
                         text=(
@@ -108,6 +110,15 @@ async def telegram_webhook(req: Request):
                 return Response(status_code=200)
 
         update = Update.de_json(data, application.bot)
+        try:
+            utype = (
+                'message' if getattr(update, 'message', None) else
+                'callback_query' if getattr(update, 'callback_query', None) else
+                'other'
+            )
+            logger.info("[webhook] incoming update: type=%s", utype)
+        except Exception:
+            pass
         await application.process_update(update)
     except Exception as e:
         logger.exception("Error processing update: %s", e)
@@ -117,3 +128,4 @@ async def telegram_webhook(req: Request):
 @app.get("/health")
 async def health():
     return {"ok": True}
+
