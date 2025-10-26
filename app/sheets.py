@@ -68,12 +68,11 @@ def _now_h() -> str:
 
 # ======== addresses ========
 def upsert_address(user_id:int, full_name:str, phone:str, city:str, address:str, postcode:str, username:str|None=""):
-    """Upsert address; store username canonically in lowercase (no leading @)."""
     ws = get_worksheet("addresses")
     df_raw = df_from_ws(ws)
     df = _ensure_addresses_columns(df_raw)
     now = _now_iso()
-    uname = (username or "").lstrip("@").lower()
+    uname = (username or "").lstrip("@")
 
     if not df.empty:
         mask = df["user_id"] == user_id
@@ -377,4 +376,24 @@ def find_orders_for_username(username: str) -> list[str]:
         return []
     mask = df["username"].astype(str).str.lower() == uname
     return list({str(x) for x in df[mask]["order_id"].astype(str).tolist() if str(x).strip()})
+
+
+# --- Added: fetch all unpaid participants grouped by order_id ---
+def get_all_unpaid_grouped():
+    """Return dict: {order_id: [username_lower, ...]} for all rows where paid == 'FALSE'.
+    Safe to use for mass reminders."
+    """
+    ws = _worksheet('participants')
+    data = ws.get_all_records()
+    result = {}
+    for row in data:
+        try:
+            order_id = str(row.get('order_id', '')).strip()
+            username = str(row.get('username', '')).strip().lower()
+            paid = str(row.get('paid', '')).strip().upper()
+            if order_id and username and paid in ('FALSE', '0', 'NO', ''):
+                result.setdefault(order_id, []).append(username)
+        except Exception:
+            continue
+    return result
 
