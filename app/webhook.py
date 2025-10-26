@@ -1,39 +1,25 @@
+# app/webhook.py
 import logging
 from fastapi import FastAPI, Request, Response
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-)
+from telegram.ext import ApplicationBuilder
 
 from .config import BOT_TOKEN
-from .main import register_handlers
-
-application = ApplicationBuilder().token(BOT_TOKEN).build()
-register_handlers(application)
-
-from app.main import admin_menu, on_admin_callback
-from .main import register_handlers
-register_handlers(application)
+from .main import register_handlers  # все хендлеры регистрируем одной функцией
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Создаём PTB-приложение один раз (без сетевых вызовов на старте)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CallbackQueryHandler(on_callback))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-application.add_handler(CommandHandler("admin", admin_menu))
-application.add_handler(CallbackQueryHandler(on_admin_callback, pattern=r"^adm:"))
+register_handlers(application)
 
 app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
+    # Ничего сетевого (initialize/set_webhook) не делаем на старте,
+    # чтобы не упасть из-за внешних ограничений — ленивая инициализация ниже.
     logger.info("FastAPI started. Waiting for Telegram updates...")
 
 @app.on_event("shutdown")
@@ -45,8 +31,11 @@ async def on_shutdown():
 
 @app.post("/telegram")
 async def telegram_webhook(req: Request):
+    """Входящий webhook от Telegram с ленивой инициализацией PTB."""
     try:
         data = await req.json()
+
+        # Ленивая инициализация PTB на первом апдейте
         if not getattr(application, "_initialized", False):
             try:
                 await application.initialize()
