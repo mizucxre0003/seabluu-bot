@@ -36,7 +36,7 @@ STATUSES = [
     "отправлен по Казахстану",
     "доставлен",
     "получен",
-    "доставка не оплачена",   # <--- НОВЫЙ СТАТУС
+    "доставка не оплачена",
 ]
 
 UNPAID_STATUS = "доставка не оплачена"
@@ -50,11 +50,8 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# корректный номер заказа, типа KR-12345 / CN12345
 ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—]?\s?(\d{3,})", re.IGNORECASE)
-# username строго с символом @
 USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{5,})")
-
 
 def extract_order_id(s: str) -> str | None:
     if not s:
@@ -66,10 +63,8 @@ def extract_order_id(s: str) -> str | None:
     num = m.group(2)
     return f"{prefix}-{num}"
 
-
 def is_valid_status(s: str, statuses: list[str]) -> bool:
     return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
-
 
 def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
     rows, row = [], []
@@ -82,7 +77,6 @@ def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -91,20 +85,19 @@ def admin_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🗂 Последние заказы", callback_data="adm:list")],
             [InlineKeyboardButton("🔍 Найти заказ", callback_data="adm:find")],
             [InlineKeyboardButton("🔎 Адрес по username", callback_data="adm:addrbyuser")],
-            [InlineKeyboardButton("📣 Напомнить об оплате", callback_data="adm:remind_unpaid")],  # НОВОЕ
+            [InlineKeyboardButton("💳 Оплата по разбору", callback_data="adm:payments")],
+            [InlineKeyboardButton("📣 Напомнить должникам", callback_data="adm:remind_unpaid")],
             [InlineKeyboardButton("↩️ Выйти", callback_data="adm:back")],
         ]
     )
 
 # ---------------------- Команды ----------------------
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я бот SEABLUU для отслеживания заказов и адресов.",
         reply_markup=MAIN_KB,
     )
-
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -117,7 +110,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• В админ-режиме можно прислать @username или список @username — пришлю адрес(а)."
     )
 
-
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -127,15 +119,12 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("adm_mode", None)
     context.user_data.pop("adm_buf", None)
 
-
 async def admin_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("adm_mode", None)
     context.user_data.pop("adm_buf", None)
     await update.message.reply_text("Админ-режим выключен.", reply_markup=MAIN_KB)
 
-
 # ---------------------- Пользовательские сценарии ----------------------
-
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
@@ -143,7 +132,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== ADMIN FLOW =====
     if update.effective_user.id in ADMIN_IDS:
-        # быстрый выход
         if text in {"отмена", "cancel", "/cancel", "/adminoff"}:
             context.user_data.pop("adm_mode", None)
             context.user_data.pop("adm_buf", None)
@@ -156,7 +144,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if a_mode == "add_order_id":
             context.user_data["adm_buf"] = {"order_id": raw}
             context.user_data["adm_mode"] = "add_order_client"
-            await update.message.reply_text("Имя клиента:")
+            await update.message.reply_text("Имя клиента (можно несколько @username):")
             return
 
         if a_mode == "add_order_client":
@@ -194,6 +182,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf = context.user_data.get("adm_buf", {})
             buf["note"] = raw if raw != "-" else ""
             try:
+                # 1) добавим заказ
                 sheets.add_order(
                     {
                         "order_id": buf["order_id"],
@@ -203,6 +192,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "note": buf.get("note", ""),
                     }
                 )
+                # 2) синхронизируем участников разбора из client_name -> participants (paid = FALSE)
+                usernames = [m.group(1) for m in USERNAME_RE.finditer(buf.get("client_name", ""))]
+                if usernames:
+                    sheets.ensure_participants(buf["order_id"], usernames)
+
                 await update.message.reply_text(
                     f"Заказ *{buf['order_id']}* добавлен ✅", parse_mode="Markdown"
                 )
@@ -294,7 +288,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("adm_mode", None)
             return
 
-        # --- Ручная рассылка «Напомнить об оплате» (ввод order_id) ---
+        # --- Ручная рассылка «Напомнить должникам» (ввод order_id) ---
         if a_mode == "adm_remind_unpaid_order":
             parsed_id = extract_order_id(raw) or raw
             ok = await remind_unpaid_for_order(context.application, parsed_id)
@@ -303,6 +297,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("Либо заказ не найден, либо нет получателей.")
             context.user_data.pop("adm_mode", None)
+            return
+
+        # --- Ввод order_id для экрана «Оплата по разбору» ---
+        if a_mode == "adm_payments_order":
+            parsed_id = extract_order_id(raw) or raw
+            order = sheets.get_order(parsed_id)
+            if not order:
+                await update.message.reply_text("Заказ не найден.")
+                context.user_data.pop("adm_mode", None)
+                return
+            await show_payments_panel(update, context, parsed_id)
             return
 
         # --- Быстрый адрес по @username (вне мастеров) ---
@@ -407,9 +412,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=MAIN_KB,
     )
 
-
 # ---------------------- Карточки / подписки / адреса ----------------------
-
 
 async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
     order_id = extract_order_id(order_id) or order_id
@@ -434,7 +437,6 @@ async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order
     await update.message.reply_markdown(txt, reply_markup=kb)
     context.user_data["mode"] = None
 
-
 async def show_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     addrs = sheets.list_addresses(update.effective_user.id)
     if not addrs:
@@ -458,7 +460,6 @@ async def show_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text("Ваш адрес доставки:\n" + "\n".join(lines), reply_markup=kb)
 
-
 async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     sheets.upsert_address(
@@ -470,7 +471,7 @@ async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         address=context.user_data.get("address", ""),
         postcode=context.user_data.get("postcode", ""),
     )
-    # автоподписка: если пользователь фигурирует в note каких-то заказов
+    # автоподписка: где клиент есть в participants
     try:
         username = (u.username or "").strip()
         if username:
@@ -494,7 +495,6 @@ async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, reply_markup=MAIN_KB)
 
-
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subs = sheets.list_subscriptions(update.effective_user.id)
     if not subs:
@@ -508,12 +508,8 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         kb_rows.append([InlineKeyboardButton(f"🗑 Отписаться от {order_id}", callback_data=f"unsub:{order_id}")])
     await update.message.reply_text("Ваши подписки:\n" + "\n".join(txt_lines), reply_markup=InlineKeyboardMarkup(kb_rows))
 
-
 async def notify_subscribers(application, order_id: str, new_status: str):
-    """
-    Стандартная рассылка подписчикам при любом изменении статуса.
-    Плюс, если статус == 'доставка не оплачена' — отдельная рассылка всем @username из примечания.
-    """
+    """Рассылка подписчикам. Для статуса 'доставка не оплачена' — только должникам по participants."""
     subs = sheets.get_all_subscriptions()
     if subs:
         targets = [s for s in subs if str(s.get("order_id")) == str(order_id)]
@@ -529,31 +525,25 @@ async def notify_subscribers(application, order_id: str, new_status: str):
             except Exception as e:
                 logging.warning(f"notify_subscribers fail to {uid}: {e}")
 
-    # Дополнительно: если статус = "доставка не оплачена" — пингуем всех из примечания
     if (new_status or "").strip().lower() == UNPAID_STATUS:
         await remind_unpaid_for_order(application, order_id)
 
-
 # ---------- Напоминания об оплате ----------
-
-def _usernames_from_note(note: str) -> list[str]:
-    return re.findall(r"@([A-Za-z0-9_]{5,})", note or "")
 
 async def remind_unpaid_for_order(application, order_id: str) -> bool:
     """
-    Собирает всех @user из note заказа, находит их user_id по листу addresses,
-    подписывает на заказ (если надо) и шлёт личное сообщение «оплатите доставку».
-    Возвращает True, если были получатели.
+    Берём должников из participants (paid = FALSE), находим их user_id по addresses,
+    подписываем на заказ (если надо) и шлём личное сообщение «оплатите доставку».
     """
     order = sheets.get_order(order_id)
     if not order:
         return False
-    note = order.get("note") or ""
-    usernames = _usernames_from_note(note)
-    if not usernames:
+
+    unpaid_usernames = sheets.get_unpaid_usernames(order_id)  # из participants
+    if not unpaid_usernames:
         return False
 
-    user_ids = sheets.get_user_ids_by_usernames(usernames)
+    user_ids = sheets.get_user_ids_by_usernames(unpaid_usernames)
     if not user_ids:
         return False
 
@@ -580,10 +570,7 @@ async def remind_unpaid_for_order(application, order_id: str) -> bool:
     return sent > 0
 
 async def remind_unpaid_daily(application) -> int:
-    """
-    Ежедневная рассылка по всем заказам, у которых статус == 'доставка не оплачена'.
-    Возвращает количество заказов, по которым были отправки.
-    """
+    """Ежедневная рассылка по всем заказам, где статус == 'доставка не оплачена'."""
     orders = sheets.list_orders_by_status(UNPAID_STATUS)
     total_orders = 0
     for o in orders:
@@ -596,23 +583,45 @@ async def remind_unpaid_daily(application) -> int:
     return total_orders
 
 def register_daily_unpaid_job(application):
-    """
-    Заготовка для ежедневной рассылки. Вызовите эту функцию один раз на старте (напр., из webhook.on_startup).
-    Требует APScheduler в зависимостях.
-    """
+    """Регистрация ежедневной рассылки (если включена в webhook.on_startup)."""
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         scheduler = AsyncIOScheduler()
-        # раз в сутки; first_run через ~1 час после старта
         scheduler.add_job(lambda: remind_unpaid_daily(application), "interval", days=1)
         scheduler.start()
         logging.info("Daily unpaid reminder job registered.")
     except Exception as e:
         logging.warning(f"Daily job not started: {e}")
 
+# ---------------------- Экран оплат по разбору ----------------------
+
+def _payments_markup(order_id: str, participants: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for p in participants:
+        u = p.get("username", "")
+        paid = str(p.get("paid", "")).strip().lower() in {"true", "1", "yes", "y"}
+        label = f"@{u} — {'✅ оплачено' if paid else '❌ не оплачено'}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"adm:toggle_paid:{order_id}:{u}")])
+    # низ
+    rows.append([InlineKeyboardButton("📣 Напомнить должникам", callback_data=f"adm:remind_unpaid_now:{order_id}")])
+    rows.append([InlineKeyboardButton("↩️ Назад в админ-меню", callback_data="adm:back")])
+    return InlineKeyboardMarkup(rows)
+
+async def show_payments_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    parts = sheets.get_participants(order_id)
+    if not parts:
+        await update.message.reply_text("В этом заказе нет участников. Добавьте @username в client_name и пере-сохраните заказ, или добавьте вручную в лист participants.")
+        context.user_data.pop("adm_mode", None)
+        return
+    await update.message.reply_text(
+        f"Оплата по заказу *{order_id}*:",
+        parse_mode="Markdown",
+        reply_markup=_payments_markup(order_id, parts),
+    )
+    context.user_data["adm_mode"] = "adm_payments_open"
+    context.user_data["adm_buf"] = {"order_id": order_id}
 
 # ---------------------- Callback Query ----------------------
-
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -675,7 +684,43 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("Пришли @username или несколько через пробел/запятую/новую строку.")
         return
 
-    # НОВОЕ: ручной пуш должникам
+    # Экран «Оплата по разбору»
+    if data == "adm:payments":
+        if update.effective_user.id in ADMIN_IDS:
+            context.user_data["adm_mode"] = "adm_payments_order"
+            await q.message.reply_text("Введи *order_id* для управления оплатами:", parse_mode="Markdown")
+        return
+
+    if data.startswith("adm:toggle_paid:"):
+        # adm:toggle_paid:<order_id>:<username>
+        if update.effective_user.id not in ADMIN_IDS:
+            return
+        _, _, order_id, uname = data.split(":", 3)
+        ok = sheets.toggle_participant_paid(order_id, uname)
+        if not ok:
+            await q.message.reply_text("Не удалось изменить оплату (проверьте участников).")
+            return
+        parts = sheets.get_participants(order_id)
+        try:
+            await q.message.edit_reply_markup(reply_markup=_payments_markup(order_id, parts))
+        except Exception:
+            # если нельзя отредактировать, просто пришлём новое
+            await q.message.reply_text("Статусы обновлены.", reply_markup=_payments_markup(order_id, parts))
+        return
+
+    if data.startswith("adm:remind_unpaid_now:"):
+        # ручная рассылка должникам прямо с панели оплат
+        if update.effective_user.id not in ADMIN_IDS:
+            return
+        order_id = data.split(":", 2)[1]
+        ok = await remind_unpaid_for_order(context.application, order_id)
+        await q.message.reply_text(
+            f"Рассылка по заказу *{order_id}* отправлена ✅" if ok else "Получателей нет или заказ не найден.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Ручной пуш должникам из главного меню
     if data == "adm:remind_unpaid":
         if update.effective_user.id in ADMIN_IDS:
             context.user_data["adm_mode"] = "adm_remind_unpaid_order"
@@ -746,9 +791,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-
 # ---------------------- Регистрация хендлеров ----------------------
-
 
 def register_handlers(application):
     application.add_handler(CommandHandler("start", start))
