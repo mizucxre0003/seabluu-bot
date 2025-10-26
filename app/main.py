@@ -377,3 +377,4 @@ def find_orders_for_username(username: str) -> list[str]:
     mask = df["username"].astype(str).str.lower() == uname
     return list({str(x) for x in df[mask]["order_id"].astype(str).tolist() if str(x).strip()})
 
+
