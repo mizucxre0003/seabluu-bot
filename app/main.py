@@ -1,4 +1,5 @@
 import logging
+import re
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -45,6 +46,10 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# детектор номера заказа (KR-12345, CN12345, SB-999 и т.п.)
+ORDER_ID_RE = re.compile(r"^[A-ZА-Я]{1,3}-?\d{3,}$", re.IGNORECASE)
+def looks_like_order_id(s: str) -> bool:
+    return bool(ORDER_ID_RE.match((s or "").strip()))
 
 # ========= БАЗОВЫЕ КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =========
 
@@ -74,6 +79,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id in ADMIN_IDS:
         mode = context.user_data.get("adm_mode")
 
+        # Добавление заказа: order_id -> client_name -> country -> status -> note -> save
         if mode == "add_order_id":
             context.user_data["adm_buf"] = {"order_id": raw}
             context.user_data["adm_mode"] = "add_order_client"
@@ -92,12 +98,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Введи 'CN' (Китай) или 'KR' (Корея):")
                 return
             context.user_data["adm_buf"]["country"] = country
-            context.user_data["adm_mode"] = "add_order_address"
-            await update.message.reply_text("ID адреса (если не используете — оставь пусто):")
-            return
-
-        if mode == "add_order_address":
-            context.user_data["adm_buf"]["address_id"] = raw
             context.user_data["adm_mode"] = "add_order_status"
             buttons = [[InlineKeyboardButton(s, callback_data=f"adm:pick_status:{s}")] for s in STATUSES[:6]]
             await update.message.reply_text(
@@ -116,11 +116,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf = context.user_data.get("adm_buf", {})
             buf["note"] = raw if raw != "-" else ""
             try:
+                # address_id не используем: кладём пустую строку, если столбец есть
                 sheets.add_order({
                     "order_id": buf["order_id"],
                     "client_name": buf.get("client_name", ""),
                     "country": buf.get("country", ""),
-                    "address_id": buf.get("address_id", ""),
                     "status": buf.get("status", "выкуплен"),
                     "note": buf.get("note", ""),
                 })
@@ -135,8 +135,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop("adm_buf", None)
             return
 
-        if mode == "upd_order_id":
-            context.user_data["adm_buf"] = {"order_id": raw}
+        # Смена статуса: примем order_id даже без явного режима, если текст похож на order_id
+        if mode == "upd_order_id" or (mode is None and looks_like_order_id(raw)):
+            context.user_data.setdefault("adm_buf", {})["order_id"] = raw
             context.user_data["adm_mode"] = "upd_pick_status"
             buttons = [[InlineKeyboardButton(s, callback_data=f"adm:set_status:{s}")] for s in STATUSES]
             await update.message.reply_text("Выбери новый статус:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -214,7 +215,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "add_address_city":
         context.user_data["city"] = raw
         await update.message.reply_text(
-            "Адрес (можно в свободной форме):\nПример: Пушкина 11, 5 подъезд, 3 этаж, кв. 12"
+            "Адрес (можно в свободной форме):\nПример: Туран 34А, 6 подъезд, 8 этаж, кв. 12"
         )
         context.user_data["mode"] = "add_address_address"
         return
@@ -434,4 +435,3 @@ def register_handlers(application):
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
