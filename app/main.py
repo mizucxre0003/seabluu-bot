@@ -36,7 +36,10 @@ STATUSES = [
     "отправлен по Казахстану",
     "доставлен",
     "получен",
+    "доставка не оплачена",   # <--- НОВЫЙ СТАТУС
 ]
+
+UNPAID_STATUS = "доставка не оплачена"
 
 MAIN_KB = ReplyKeyboardMarkup(
     [
@@ -49,7 +52,7 @@ MAIN_KB = ReplyKeyboardMarkup(
 
 # корректный номер заказа, типа KR-12345 / CN12345
 ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—]?\s?(\d{3,})", re.IGNORECASE)
-# username теперь строго с символом @ (чтобы не ловить телефон!)
+# username строго с символом @
 USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{5,})")
 
 
@@ -88,6 +91,7 @@ def admin_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🗂 Последние заказы", callback_data="adm:list")],
             [InlineKeyboardButton("🔍 Найти заказ", callback_data="adm:find")],
             [InlineKeyboardButton("🔎 Адрес по username", callback_data="adm:addrbyuser")],
+            [InlineKeyboardButton("📣 Напомнить об оплате", callback_data="adm:remind_unpaid")],  # НОВОЕ
             [InlineKeyboardButton("↩️ Выйти", callback_data="adm:back")],
         ]
     )
@@ -290,6 +294,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("adm_mode", None)
             return
 
+        # --- Ручная рассылка «Напомнить об оплате» (ввод order_id) ---
+        if a_mode == "adm_remind_unpaid_order":
+            parsed_id = extract_order_id(raw) or raw
+            ok = await remind_unpaid_for_order(context.application, parsed_id)
+            if ok:
+                await update.message.reply_text(f"Рассылка по заказу *{parsed_id}* отправлена ✅", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("Либо заказ не найден, либо нет получателей.")
+            context.user_data.pop("adm_mode", None)
+            return
+
         # --- Быстрый адрес по @username (вне мастеров) ---
         if "@" in raw and USERNAME_RE.search(raw) and not a_mode and not context.user_data.get("mode"):
             usernames = [m.group(1) for m in USERNAME_RE.finditer(raw)]
@@ -455,6 +470,19 @@ async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
         address=context.user_data.get("address", ""),
         postcode=context.user_data.get("postcode", ""),
     )
+    # автоподписка: если пользователь фигурирует в note каких-то заказов
+    try:
+        username = (u.username or "").strip()
+        if username:
+            rel_orders = sheets.find_orders_for_username(username)
+            for oid in rel_orders:
+                try:
+                    sheets.subscribe(u.id, oid)
+                except Exception:
+                    pass
+    except Exception as e:
+        logging.warning(f"auto-subscribe on address save failed: {e}")
+
     context.user_data["mode"] = None
     msg = (
         "Адрес сохранён ✅\n\n"
@@ -482,21 +510,105 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def notify_subscribers(application, order_id: str, new_status: str):
+    """
+    Стандартная рассылка подписчикам при любом изменении статуса.
+    Плюс, если статус == 'доставка не оплачена' — отдельная рассылка всем @username из примечания.
+    """
     subs = sheets.get_all_subscriptions()
-    if not subs:
-        return
-    targets = [s for s in subs if str(s.get("order_id")) == str(order_id)]
-    for s in targets:
-        uid = int(s["user_id"])
+    if subs:
+        targets = [s for s in subs if str(s.get("order_id")) == str(order_id)]
+        for s in targets:
+            uid = int(s["user_id"])
+            try:
+                await application.bot.send_message(
+                    chat_id=uid,
+                    text=f"Обновление по заказу *{order_id}*\nНовый статус: *{new_status}*",
+                    parse_mode="Markdown",
+                )
+                sheets.set_last_sent_status(uid, order_id, new_status)
+            except Exception as e:
+                logging.warning(f"notify_subscribers fail to {uid}: {e}")
+
+    # Дополнительно: если статус = "доставка не оплачена" — пингуем всех из примечания
+    if (new_status or "").strip().lower() == UNPAID_STATUS:
+        await remind_unpaid_for_order(application, order_id)
+
+
+# ---------- Напоминания об оплате ----------
+
+def _usernames_from_note(note: str) -> list[str]:
+    return re.findall(r"@([A-Za-z0-9_]{5,})", note or "")
+
+async def remind_unpaid_for_order(application, order_id: str) -> bool:
+    """
+    Собирает всех @user из note заказа, находит их user_id по листу addresses,
+    подписывает на заказ (если надо) и шлёт личное сообщение «оплатите доставку».
+    Возвращает True, если были получатели.
+    """
+    order = sheets.get_order(order_id)
+    if not order:
+        return False
+    note = order.get("note") or ""
+    usernames = _usernames_from_note(note)
+    if not usernames:
+        return False
+
+    user_ids = sheets.get_user_ids_by_usernames(usernames)
+    if not user_ids:
+        return False
+
+    sent = 0
+    for uid in user_ids:
+        try:
+            sheets.subscribe(uid, order_id)
+        except Exception:
+            pass
         try:
             await application.bot.send_message(
-                chat_id=uid,
-                text=f"Обновление по заказу *{order_id}*\nНовый статус: *{new_status}*",
+                chat_id=int(uid),
+                text=(
+                    f"Заказ *{order_id}*\n"
+                    f"Статус: *Доставка не оплачена*\n\n"
+                    f"Пожалуйста, оплатите доставку. "
+                    f"Если уже оплатили — проигнорируйте сообщение или свяжитесь с админом."
+                ),
                 parse_mode="Markdown",
             )
-            sheets.set_last_sent_status(uid, order_id, new_status)
+            sent += 1
         except Exception as e:
-            logging.warning(f"notify_subscribers fail to {uid}: {e}")
+            logging.warning(f"payment reminder fail to {uid}: {e}")
+    return sent > 0
+
+async def remind_unpaid_daily(application) -> int:
+    """
+    Ежедневная рассылка по всем заказам, у которых статус == 'доставка не оплачена'.
+    Возвращает количество заказов, по которым были отправки.
+    """
+    orders = sheets.list_orders_by_status(UNPAID_STATUS)
+    total_orders = 0
+    for o in orders:
+        oid = o.get("order_id")
+        if not oid:
+            continue
+        ok = await remind_unpaid_for_order(application, oid)
+        if ok:
+            total_orders += 1
+    return total_orders
+
+def register_daily_unpaid_job(application):
+    """
+    Заготовка для ежедневной рассылки. Вызовите эту функцию один раз на старте (напр., из webhook.on_startup).
+    Требует APScheduler в зависимостях.
+    """
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        scheduler = AsyncIOScheduler()
+        # раз в сутки; first_run через ~1 час после старта
+        scheduler.add_job(lambda: remind_unpaid_daily(application), "interval", days=1)
+        scheduler.start()
+        logging.info("Daily unpaid reminder job registered.")
+    except Exception as e:
+        logging.warning(f"Daily job not started: {e}")
 
 
 # ---------------------- Callback Query ----------------------
@@ -561,6 +673,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id in ADMIN_IDS:
             context.user_data["adm_mode"] = "adm_addr_usernames"
             await q.message.reply_text("Пришли @username или несколько через пробел/запятую/новую строку.")
+        return
+
+    # НОВОЕ: ручной пуш должникам
+    if data == "adm:remind_unpaid":
+        if update.effective_user.id in ADMIN_IDS:
+            context.user_data["adm_mode"] = "adm_remind_unpaid_order"
+            await q.message.reply_text("Введи *order_id* для рассылки неплательщикам:", parse_mode="Markdown")
         return
 
     # --- Подбор стартового статуса при добавлении заказа ---
