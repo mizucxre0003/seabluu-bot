@@ -7,7 +7,11 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder
 
 from .config import BOT_TOKEN
-from .main import register_handlers, register_daily_unpaid_job, register_admin_ui
+try:
+    from .main import register_handlers, register_daily_unpaid_job, register_admin_ui
+except Exception:
+    from .main import register_handlers, register_daily_unpaid_job
+    register_admin_ui = None
 from . import sheets
 
 logging.basicConfig(level=logging.INFO)
@@ -16,12 +20,15 @@ logger = logging.getLogger(__name__)
 # PTB Application
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 register_handlers(application)
-# Register admin UI
-try:
-    register_admin_ui(application)
-    logger.info('Admin UI handlers registered.')
-except Exception as e:
-    logger.warning('Admin UI not registered: %s', e)
+# Register admin UI (if available)
+if register_admin_ui:
+    try:
+        register_admin_ui(application)
+        logger.info('Admin UI handlers registered.')
+    except Exception as e:
+        logger.warning('Admin UI not registered: %s', e)
+else:
+    logger.info('Admin UI not present in main, skipping.')
 
 # FastAPI app
 app = FastAPI()
