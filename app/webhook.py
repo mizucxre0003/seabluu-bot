@@ -16,12 +16,12 @@ logger = logging.getLogger(__name__)
 # PTB Application
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 register_handlers(application)
-# Register admin UI (reply keyboard, submenus)
+# Register admin UI
 try:
     register_admin_ui(application)
-    logger.info("Admin UI handlers registered.")
+    logger.info('Admin UI handlers registered.')
 except Exception as e:
-    logger.warning("Admin UI not registered: %s", e)
+    logger.warning('Admin UI not registered: %s', e)
 
 # FastAPI app
 app = FastAPI()
