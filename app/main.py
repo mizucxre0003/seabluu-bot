@@ -267,6 +267,47 @@ def order_card_kb(order_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("✏️ Изменить статус", callback_data=f"adm:status_menu:{order_id}")],
         ]
     )
+    
+# ---- Подсказка для текущего шага админа (чтобы не «выкидывало») ----
+def _admin_mode_prompt(mode: str):
+    """Вернёт (текст, reply_markup) для повторного запроса на текущем шаге."""
+    if mode == "add_order_id":
+        return "Введи order_id (например: CN-12345):", None
+    if mode == "add_order_client":
+        return "Имя клиента (можно несколько @username):", None
+    if mode == "add_order_country":
+        return "Страна/склад: введи 'CN' (Китай) или 'KR' (Корея):", None
+    if mode == "add_order_status":
+        return "Выбери стартовый статус кнопкой ниже или напиши точный:", status_keyboard(2)
+    if mode == "add_order_note":
+        return "Примечание (или '-' если нет):", None
+    if mode == "find_order":
+        return "Введи order_id для поиска (например: CN-12345):", None
+    if mode == "adm_remind_unpaid_order":
+        return "Введи order_id для рассылки неплательщикам:", None
+    if mode == "adm_export_addrs":
+        return "Пришли список @username (через пробел/запятую/новые строки):", None
+    if mode == "adm_edit_addr_username":
+        return "Пришли @username пользователя, чей адрес нужно изменить:", None
+    if mode == "adm_edit_addr_fullname":
+        return "ФИО (новое значение):", None
+    if mode == "adm_edit_addr_phone":
+        return "Телефон:", None
+    if mode == "adm_edit_addr_city":
+        return "Город:", None
+    if mode == "adm_edit_addr_address":
+        return "Адрес:", None
+    if mode == "adm_edit_addr_postcode":
+        return "Почтовый индекс:", None
+    if mode == "adm_export_orders_by_note":
+        return "Пришли метку/слово из note (по ней выгружу разборы):", None
+    if mode == "mass_pick_status":
+        return "Выбери новый статус для нескольких заказов:", status_keyboard_with_prefix("mass:pick_status_id")
+    if mode == "mass_update_status_ids":
+        return ("Пришли список order_id (через пробел/запятые/новые строки), "
+                "например: CN-1001 CN-1002, KR-2003"), None
+    # по умолчанию — просто покажем админ-меню
+    return "Вы в админ-панели. Выберите действие:", ADMIN_MENU_KB
 
 # ---------------------- Команды ----------------------
 
@@ -728,7 +769,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_address(update, context)
         return
 
-    # Ничего не подошло
+  # Ничего не подошло — отдельная ветка для админов и для клиентов
+    if _is_admin(update.effective_user.id):
+        a_mode = context.user_data.get("adm_mode")
+        # если админ в конкретном шаге — не выходим, а просим ввести корректно
+        if a_mode:
+            msg, kb = _admin_mode_prompt(a_mode)
+            await reply_animated(update, context, f"⚠️ Не понял. {msg}", reply_markup=kb or ADMIN_MENU_KB)
+            return
+        # если админ не в шаге — просто перерисуем админ-меню
+        await reply_animated(update, context, "Вы в админ-панели. Выберите действие:", reply_markup=ADMIN_MENU_KB)
+        return
+
+    # Клиентский фолбэк
     await reply_animated(
         update, context,
         "Хмм, не понял. Выберите кнопку ниже или введите номер заказа. Если что — «Отмена».",
