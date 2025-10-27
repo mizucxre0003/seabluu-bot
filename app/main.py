@@ -948,6 +948,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await reply_animated(update, context, "Заказ не найден.")
         return
 
+    # <<< НОВОЕ >>> выбор статуса в мастере добавления заказа
+    if data.startswith("adm:pick_status_id:"):
+        if not _is_admin(update.effective_user.id):
+            return
+        _, _, idx_s = data.split(":")
+        try:
+            idx = int(idx_s)
+            chosen = STATUSES[idx]
+        except Exception:
+            await reply_animated(update, context, "Некорректный выбор статуса.")
+            return
+        # положим в буфер и перейдём к шагу «примечание»
+        context.user_data.setdefault("adm_buf", {})["status"] = chosen
+        context.user_data["adm_mode"] = "add_order_note"
+        await reply_animated(update, context, "Примечание (или '-' если нет):")
+        return
+
     # массовая смена статусов: выбор статуса (шаг 1)
     if data.startswith("mass:pick_status_id:"):
         if not _is_admin(update.effective_user.id):
