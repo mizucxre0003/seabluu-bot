@@ -123,6 +123,39 @@ def add_order(order: Dict[str, Any] = None, **kwargs) -> None:
     if len(df):
         ws.append_rows(df.values.tolist())
 
+def update_order_status(order_id: str, new_status: str) -> bool:
+    """Обновить статус заказа и updated_at. Возвращает True/False (найдена ли запись)."""
+    ws = get_worksheet("orders")
+    values = ws.get_all_records()
+    if not values:
+        return False
+    df = pd.DataFrame(values)
+    df = _ensure_orders_cols(df)
+    mask = df["order_id"].astype(str).str.lower() == str(order_id).lower()
+    if not mask.any():
+        return False
+    df.loc[mask, "status"] = new_status
+    df.loc[mask, "updated_at"] = _now()
+    ws.clear()
+    ws.append_row(list(df.columns))
+    if len(df):
+        ws.append_rows(df.values.tolist())
+    return True
+
+def get_orders_by_note(marker: str) -> List[Dict[str, Any]]:
+    """Вернуть все заказы, у которых note содержит подстроку marker (case-insensitive)."""
+    ws = get_worksheet("orders")
+    values = ws.get_all_records()
+    if not values:
+        return []
+    df = pd.DataFrame(values)
+    df = _ensure_orders_cols(df)
+    m = str(marker).strip().lower()
+    if not m:
+        return []
+    subset = df[df["note"].astype(str).str.lower().str.contains(m, na=False)]
+    return subset.to_dict(orient="records")
+
 # -------------------------------------------------
 #  ADDRESSES
 # -------------------------------------------------
@@ -299,6 +332,38 @@ def list_subscriptions(user_id: int) -> List[Dict[str, Any]]:
             result.append(r)
     return result
 
+def get_all_subscriptions() -> List[Dict[str, Any]]:
+    """Вернуть все подписки (для рассылки подписчикам по статусу)."""
+    ws = get_worksheet("subscriptions")
+    return ws.get_all_records()
+
+def set_last_sent_status(user_id: int, order_id: str, status: str) -> None:
+    """Обновить last_sent_status у подписки; если нет — создать."""
+    ws = get_worksheet("subscriptions")
+    values = ws.get_all_records()
+    df = pd.DataFrame(values)
+    if not df.empty:
+        df = _ensure_subs_cols(df)
+
+    now = _now()
+    if df.empty:
+        df = pd.DataFrame([{
+            "user_id": user_id, "order_id": order_id,
+            "last_sent_status": status, "created_at": now, "updated_at": now
+        }])
+    else:
+        mask = (df["user_id"].astype(str) == str(user_id)) & (df["order_id"].astype(str).str.lower() == order_id.lower())
+        if mask.any():
+            df.loc[mask, "last_sent_status"] = status
+            df.loc[mask, "updated_at"] = now
+        else:
+            df.loc[len(df)] = [user_id, order_id, status, now, now]
+
+    ws.clear()
+    ws.append_row(list(df.columns))
+    if len(df):
+        ws.append_rows(df.values.tolist())
+
 # -------------------------------------------------
 #  PARTICIPANTS (разборы и оплаты)
 # -------------------------------------------------
@@ -352,7 +417,6 @@ def get_participants(order_id: str) -> List[Dict[str, Any]]:
                 "paid": str(r.get("paid", "")).strip().lower() in ("true", "1", "yes", "y"),
                 "qty": r.get("qty", ""),
             })
-    # сортировка по username
     res.sort(key=lambda x: x["username"])
     return res
 
