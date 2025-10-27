@@ -1,6 +1,7 @@
 # app/main.py
 import logging
 import re
+import asyncio
 from typing import List, Tuple, Dict
 
 from telegram import (
@@ -17,6 +18,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from telegram.constants import ChatAction
 
 from . import sheets
 from .config import ADMIN_IDS
@@ -61,49 +63,133 @@ def is_valid_status(s: str, statuses: list[str]) -> bool:
 def _is_admin(uid) -> bool:
     return uid in ADMIN_IDS or str(uid) in {str(x) for x in ADMIN_IDS}
 
+# -------- небольшая «анимация» ответов (эффект печати) --------
+
+async def _typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int, seconds: float = 0.6):
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+    await asyncio.sleep(seconds)
+
+async def reply_animated(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
+    msg = update.message or update.callback_query.message
+    await _typing(context, msg.chat_id)
+    return await msg.reply_text(text, **kwargs)
+
+async def reply_markdown_animated(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
+    msg = update.message or update.callback_query.message
+    await _typing(context, msg.chat_id)
+    return await msg.reply_markdown(text, **kwargs)
+
+# ---------------------- Текст кнопок (новые + обратная совместимость) ----------------------
+
+# Клиентские
+BTN_TRACK_NEW = "🔍 Отследить разбор"
+BTN_ADDRS_NEW = "🏠 Мои адреса"
+BTN_SUBS_NEW  = "🔔 Мои подписки"
+BTN_CANCEL_NEW = "❌ Отмена"
+
+CLIENT_ALIASES = {
+    "track": {BTN_TRACK_NEW, "отследить разбор"},
+    "addrs": {BTN_ADDRS_NEW, "мои адреса"},
+    "subs":  {BTN_SUBS_NEW,  "мои подписки"},
+    "cancel": {BTN_CANCEL_NEW, "отмена", "cancel"},
+}
+
+# Админские
+BTN_ADMIN_ADD_NEW     = "➕ Добавить разбор"
+BTN_ADMIN_TRACK_NEW   = "🔎 Отследить разбор"
+BTN_ADMIN_SEND_NEW    = "📣 Админ: Рассылка"
+BTN_ADMIN_ADDRS_NEW   = "📇 Админ: Адреса"
+BTN_ADMIN_REPORTS_NEW = "📊 Отчёты"
+BTN_ADMIN_EXIT_NEW    = "🚪 Выйти из админ-панели"
+
+BTN_BACK_TO_ADMIN_NEW = "⬅️ Назад, в админ-панель"
+
+ADMIN_MENU_ALIASES = {
+    "admin_add": {BTN_ADMIN_ADD_NEW, "добавить разбор"},
+    "admin_track": {BTN_ADMIN_TRACK_NEW, "отследить разбор"},
+    "admin_send": {BTN_ADMIN_SEND_NEW, "админ: рассылка"},
+    "admin_addrs": {BTN_ADMIN_ADDRS_NEW, "админ: адреса"},
+    "admin_reports": {BTN_ADMIN_REPORTS_NEW, "отчёты"},
+    "admin_exit": {BTN_ADMIN_EXIT_NEW, "выйти из админ-панели"},
+    "back_admin": {BTN_BACK_TO_ADMIN_NEW, "назад, в админ-панель"},
+}
+
+# Подменю «Рассылка»
+BTN_BC_ALL_NEW  = "📨 Уведомления всем должникам"
+BTN_BC_ONE_NEW  = "📩 Уведомления по ID разбора"
+
+BROADCAST_ALIASES = {
+    "bc_all": {BTN_BC_ALL_NEW, "уведомления всем должникам"},
+    "bc_one": {BTN_BC_ONE_NEW, "уведомления по id разбора"},
+}
+
+# Подменю «Адреса»
+BTN_ADDRS_EXPORT_NEW = "📤 Выгрузить адреса"
+BTN_ADDRS_EDIT_NEW   = "✏️ Изменить адрес по username"
+
+ADMIN_ADDR_ALIASES = {
+    "export_addrs": {BTN_ADDRS_EXPORT_NEW, "выгрузить адреса"},
+    "edit_addr":    {BTN_ADDRS_EDIT_NEW, "изменить адрес по username"},
+}
+
+# Подменю «Отчёты»
+BTN_REPORT_EXPORT_BY_NOTE_NEW = "🧾 Выгрузить разборы админа"
+BTN_REPORT_UNPAID_NEW         = "🧮 Отчёт по должникам"
+
+REPORT_ALIASES = {
+    "report_by_note": {BTN_REPORT_EXPORT_BY_NOTE_NEW, "выгрузить разборы админа"},
+    "report_unpaid": {BTN_REPORT_UNPAID_NEW, "отчёт по должникам"},
+}
+
+def _is(text: str, group: set[str]) -> bool:
+    return text.strip().lower() in {x.lower() for x in group}
+
 # ---------------------- Клавиатуры ----------------------
 
 MAIN_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Отследить разбор")],
-        [KeyboardButton("Мои адреса"), KeyboardButton("Мои подписки")],
-        [KeyboardButton("Отмена")],
+        [KeyboardButton(BTN_TRACK_NEW)],
+        [KeyboardButton(BTN_ADDRS_NEW), KeyboardButton(BTN_SUBS_NEW)],
+        [KeyboardButton(BTN_CANCEL_NEW)],
     ],
     resize_keyboard=True,
 )
 
 ADMIN_MENU_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Добавить разбор"), KeyboardButton("Отследить разбор")],
-        [KeyboardButton("Админ: Рассылка"), KeyboardButton("Админ: Адреса")],
-        [KeyboardButton("Отчёты"), KeyboardButton("Выйти из админ-панели")],
+        [KeyboardButton(BTN_ADMIN_ADD_NEW),  KeyboardButton(BTN_ADMIN_TRACK_NEW)],
+        [KeyboardButton(BTN_ADMIN_SEND_NEW), KeyboardButton(BTN_ADMIN_ADDRS_NEW)],
+        [KeyboardButton(BTN_ADMIN_REPORTS_NEW), KeyboardButton(BTN_ADMIN_EXIT_NEW)],
     ],
     resize_keyboard=True,
 )
 
 BROADCAST_MENU_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Уведомления всем должникам")],
-        [KeyboardButton("Уведомления по ID разбора")],
-        [KeyboardButton("Назад, в админ-панель")],
+        [KeyboardButton(BTN_BC_ALL_NEW)],
+        [KeyboardButton(BTN_BC_ONE_NEW)],
+        [KeyboardButton(BTN_BACK_TO_ADMIN_NEW)],
     ],
     resize_keyboard=True,
 )
 
 ADMIN_ADDR_MENU_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Выгрузить адреса")],
-        [KeyboardButton("Изменить адрес по username")],
-        [KeyboardButton("Назад, в админ-панель")],
+        [KeyboardButton(BTN_ADDRS_EXPORT_NEW)],
+        [KeyboardButton(BTN_ADDRS_EDIT_NEW)],
+        [KeyboardButton(BTN_BACK_TO_ADMIN_NEW)],
     ],
     resize_keyboard=True,
 )
 
 REPORTS_MENU_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("Выгрузить разборы админа")],
-        [KeyboardButton("Отчёт по должникам")],
-        [KeyboardButton("Назад, в админ-панель")],
+        [KeyboardButton(BTN_REPORT_EXPORT_BY_NOTE_NEW)],
+        [KeyboardButton(BTN_REPORT_UNPAID_NEW)],
+        [KeyboardButton(BTN_BACK_TO_ADMIN_NEW)],
     ],
     resize_keyboard=True,
 )
@@ -145,7 +231,7 @@ def build_participants_kb(order_id: str, participants: List[dict], page: int, pe
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("« Назад", callback_data=f"pp:page:{order_id}:{page-1}"))
-    nav.append(InlineKeyboardButton("Обновить", callback_data=f"pp:refresh:{order_id}:{page}"))
+    nav.append(InlineKeyboardButton("🔄 Обновить", callback_data=f"pp:refresh:{order_id}:{page}"))
     if (page + 1) * per_page < len(participants):
         nav.append(InlineKeyboardButton("Вперёд »", callback_data=f"pp:page:{order_id}:{page+1}"))
     if nav:
@@ -162,17 +248,20 @@ def order_card_kb(order_id: str) -> InlineKeyboardMarkup:
 # ---------------------- Команды ----------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await (update.message or update.callback_query.message).reply_text(
-        "Привет! Я бот SEABLUU для отслеживания заказов и адресов.",
-        reply_markup=MAIN_KB,
+    # Дружелюбное приветствие + лёгкая «анимация»
+    hello = (
+        "✨ Привет! Я *SEABLUU*-бот — помогу отследить разборы, адреса и подписки.\n\n"
+        "Что делаем? ↓"
     )
+    await reply_markdown_animated(update, context, hello, reply_markup=MAIN_KB)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Команды:\n"
-        "• Отследить заказ — статус по номеру\n"
-        "• Мои адреса — добавить/изменить адрес\n"
-        "• Мои подписки — список подписок\n"
+    await reply_animated(
+        update, context,
+        "📘 Помощь:\n"
+        "• 🔍 Отследить разбор — статус по номеру\n"
+        "• 🏠 Мои адреса — добавить/изменить адрес\n"
+        "• 🔔 Мои подписки — список подписок\n"
         "• /admin — админ-панель (для админов)"
     )
 
@@ -181,9 +270,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     for k in ("adm_mode", "adm_buf", "awaiting_unpaid_order_id"):
         context.user_data.pop(k, None)
-    await (update.message or update.callback_query.message).reply_text(
-        "Админ-панель:", reply_markup=ADMIN_MENU_KB
-    )
+    await reply_animated(update, context, "🛠 Открываю админ-панель…", reply_markup=ADMIN_MENU_KB)
 
 # ---------------------- Пользовательские сценарии ----------------------
 
@@ -194,68 +281,68 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ADMIN FLOW =====
     if _is_admin(update.effective_user.id):
 
-        if text == "выйти из админ-панели":
+        if _is(text, ADMIN_MENU_ALIASES["admin_exit"]):
             context.user_data.clear()
-            await update.message.reply_text("Ок, вышли из админ-панели.", reply_markup=MAIN_KB)
+            await reply_animated(update, context, "🚪 Готово, вышли из админ-панели.", reply_markup=MAIN_KB)
             return
 
-        if text == "добавить разбор":
+        if _is(text, ADMIN_MENU_ALIASES["admin_add"]):
             context.user_data["adm_mode"] = "add_order_id"
             context.user_data["adm_buf"] = {}
-            await update.message.reply_text("Введи *order_id* (например: CN-12345):", parse_mode="Markdown")
+            await reply_markdown_animated(update, context, "➕ Введи *order_id* (например: `CN-12345`):")
             return
 
-        if text == "отчёты":
-            await update.message.reply_text("Раздел «Отчёты»", reply_markup=REPORTS_MENU_KB)
+        if _is(text, ADMIN_MENU_ALIASES["admin_reports"]):
+            await reply_animated(update, context, "📊 Раздел «Отчёты»", reply_markup=REPORTS_MENU_KB)
             return
 
-        if text == "админ: рассылка":
-            await update.message.reply_text("Раздел «Рассылка»", reply_markup=BROADCAST_MENU_KB)
+        if _is(text, ADMIN_MENU_ALIASES["admin_send"]):
+            await reply_animated(update, context, "📣 Раздел «Рассылка»", reply_markup=BROADCAST_MENU_KB)
             return
 
-        if text == "админ: адреса":
-            await update.message.reply_text("Раздел «Адреса»", reply_markup=ADMIN_ADDR_MENU_KB)
+        if _is(text, ADMIN_MENU_ALIASES["admin_addrs"]):
+            await reply_animated(update, context, "📇 Раздел «Адреса»", reply_markup=ADMIN_ADDR_MENU_KB)
             return
 
-        if text == "назад, в админ-панель":
+        if _is(text, ADMIN_MENU_ALIASES["back_admin"]):
             await admin_menu(update, context)
             return
 
         # --- Рассылка
-        if text == "уведомления всем должникам":
+        if _is(text, BROADCAST_ALIASES["bc_all"]):
             await broadcast_all_unpaid_text(update, context)
             return
 
-        if text == "уведомления по id разбора":
+        if _is(text, BROADCAST_ALIASES["bc_one"]):
             context.user_data["adm_mode"] = "adm_remind_unpaid_order"
-            await update.message.reply_text("Введи *order_id* для рассылки неплательщикам:", parse_mode="Markdown")
+            await reply_markdown_animated(update, context, "✉️ Введи *order_id* для рассылки неплательщикам:")
             return
 
         # --- Адреса (подменю)
-        if text == "выгрузить адреса":
+        if _is(text, ADMIN_ADDR_ALIASES["export_addrs"]):
             context.user_data["adm_mode"] = "adm_export_addrs"
-            await update.message.reply_text("Пришли список @username (через пробел/запятую/новые строки):")
+            await reply_animated(update, context, "Пришли список @username (через пробел/запятую/новые строки):")
             return
 
-        if text == "изменить адрес по username":
+        if _is(text, ADMIN_ADDR_ALIASES["edit_addr"]):
             context.user_data["adm_mode"] = "adm_edit_addr_username"
-            await update.message.reply_text("Пришли @username пользователя, чей адрес нужно изменить:")
+            await reply_animated(update, context, "Пришли @username пользователя, чей адрес нужно изменить:")
             return
 
         # --- Отчёты (подменю)
-        if text == "выгрузить разборы админа":
+        if _is(text, REPORT_ALIASES["report_by_note"]):
             context.user_data["adm_mode"] = "adm_export_orders_by_note"
-            await update.message.reply_text("Пришли метку/слово из *note*, по которому помечены твои разборы:", parse_mode="Markdown")
+            await reply_markdown_animated(update, context, "🧾 Пришли метку/слово из *note*, по которому помечены твои разборы:")
             return
 
-        if text == "отчёт по должникам":
+        if _is(text, REPORT_ALIASES["report_unpaid"]):
             await report_unpaid(update, context)
             return
 
         # --- Отследить разбор
-        if text == "отследить разбор" and (context.user_data.get("adm_mode") is None):
+        if _is(text, ADMIN_MENU_ALIASES["admin_track"]) and (context.user_data.get("adm_mode") is None):
             context.user_data["adm_mode"] = "find_order"
-            await update.message.reply_text("Введи *order_id* для поиска:", parse_mode="Markdown")
+            await reply_markdown_animated(update, context, "🔎 Введи *order_id* для поиска:")
             return
 
         # --- Мастера/вводы ---
@@ -265,32 +352,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if a_mode == "add_order_id":
             context.user_data["adm_buf"] = {"order_id": raw}
             context.user_data["adm_mode"] = "add_order_client"
-            await update.message.reply_text("Имя клиента (можно несколько @username):")
+            await reply_animated(update, context, "Имя клиента (можно несколько @username):")
             return
 
         if a_mode == "add_order_client":
             context.user_data["adm_buf"]["client_name"] = raw
             context.user_data["adm_mode"] = "add_order_country"
-            await update.message.reply_text("Страна/склад (CN или KR):")
+            await reply_animated(update, context, "Страна/склад (CN или KR):")
             return
 
         if a_mode == "add_order_country":
             country = raw.upper()
             if country not in ("CN", "KR"):
-                await update.message.reply_text("Введи 'CN' (Китай) или 'KR' (Корея):")
+                await reply_animated(update, context, "Введи 'CN' (Китай) или 'KR' (Корея):")
                 return
             context.user_data["adm_buf"]["country"] = country
             context.user_data["adm_mode"] = "add_order_status"
-            await update.message.reply_text("Выбери стартовый статус кнопкой ниже или напиши точный:", reply_markup=status_keyboard(2))
+            await reply_animated(update, context, "Выбери стартовый статус кнопкой ниже или напиши точный:", reply_markup=status_keyboard(2))
             return
 
         if a_mode == "add_order_status":
             if not is_valid_status(raw, STATUSES):
-                await update.message.reply_text("Выбери статус кнопкой ниже или напиши точный:", reply_markup=status_keyboard(2))
+                await reply_animated(update, context, "Выбери статус кнопкой ниже или напиши точный:", reply_markup=status_keyboard(2))
                 return
             context.user_data["adm_buf"]["status"] = raw.strip()
             context.user_data["adm_mode"] = "add_order_note"
-            await update.message.reply_text("Примечание (или '-' если нет):")
+            await reply_animated(update, context, "Примечание (или '-' если нет):")
             return
 
         if a_mode == "add_order_note":
@@ -307,9 +394,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 usernames = [m.group(1) for m in USERNAME_RE.finditer(buf.get("client_name", ""))]
                 if usernames:
                     sheets.ensure_participants(buf["order_id"], usernames)
-                await update.message.reply_text(f"Заказ *{buf['order_id']}* добавлен ✅", parse_mode="Markdown")
+                await reply_markdown_animated(update, context, f"✅ Заказ *{buf['order_id']}* добавлен")
             except Exception as e:
-                await update.message.reply_text(f"Ошибка: {e}")
+                await reply_animated(update, context, f"Ошибка: {e}")
             finally:
                 for k in ("adm_mode", "adm_buf"):
                     context.user_data.pop(k, None)
@@ -320,7 +407,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parsed_id = extract_order_id(raw) or raw
             order = sheets.get_order(parsed_id)
             if not order:
-                await update.message.reply_text("Заказ не найден.")
+                await reply_animated(update, context, "🙈 Заказ не найден.")
                 context.user_data.pop("adm_mode", None)
                 return
 
@@ -344,14 +431,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if updated_at:
                 head.append(f"*updated_at:* {updated_at}")
 
-            await update.message.reply_markdown("\n".join(head), reply_markup=order_card_kb(order_id))
+            await reply_markdown_animated(update, context, "\n".join(head), reply_markup=order_card_kb(order_id))
 
             # участники
             participants = sheets.get_participants(order_id)
             page = 0; per_page = 8
             part_text = build_participants_text(order_id, participants, page, per_page)
             kb = build_participants_kb(order_id, participants, page, per_page)
-            await update.message.reply_markdown(part_text, reply_markup=kb)
+            await reply_markdown_animated(update, context, part_text, reply_markup=kb)
 
             context.user_data.pop("adm_mode", None)
             return
@@ -360,9 +447,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if a_mode == "adm_remind_unpaid_order":
             parsed_id = extract_order_id(raw) or raw
             ok = await remind_unpaid_for_order(context.application, parsed_id)
-            await update.message.reply_text(
-                f"Рассылка по заказу *{parsed_id}* отправлена ✅" if ok else "Либо заказ не найден, либо нет получателей.",
-                parse_mode="Markdown",
+            await reply_markdown_animated(
+                update, context,
+                f"📨 Рассылка по заказу *{parsed_id}* отправлена ✅" if ok else "Либо заказ не найден, либо нет получателей."
             )
             context.user_data.pop("adm_mode", None)
             return
@@ -371,11 +458,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if a_mode == "adm_export_addrs":
             usernames = [m.group(1) for m in USERNAME_RE.finditer(raw)]
             if not usernames:
-                await update.message.reply_text("Пришли список @username.")
+                await reply_animated(update, context, "Пришли список @username.")
                 return
             rows = sheets.get_addresses_by_usernames(usernames)
             if not rows:
-                await update.message.reply_text("Адреса не найдены.")
+                await reply_animated(update, context, "Адреса не найдены.")
             else:
                 lines = []
                 for r in rows:
@@ -388,49 +475,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Индекс: {r.get('postcode','')}\n"
                         "—"
                     )
-                await update.message.reply_text("\n".join(lines))
+                await reply_animated(update, context, "\n".join(lines))
             context.user_data.pop("adm_mode", None)
             return
 
-        # Изменить адрес по username — шаг 1: получить username и загрузить текущие поля
+        # Изменить адрес по username — шаги мастера
         if a_mode == "adm_edit_addr_username":
             usernames = [m.group(1) for m in USERNAME_RE.finditer(raw)]
             if not usernames:
-                await update.message.reply_text("Пришли @username.")
+                await reply_animated(update, context, "Пришли @username.")
                 return
             uname = usernames[0].lower()
             ids = sheets.get_user_ids_by_usernames([uname])
             if not ids:
-                await update.message.reply_text("Пользователь не найден по username (нет записи в адресах).")
+                await reply_animated(update, context, "Пользователь не найден по username (нет записи в адресах).")
                 context.user_data.pop("adm_mode", None)
                 return
             context.user_data["adm_mode"] = "adm_edit_addr_fullname"
             context.user_data["adm_buf"] = {"edit_user_id": ids[0], "edit_username": uname}
-            await update.message.reply_text("ФИО (новое значение):")
+            await reply_animated(update, context, "ФИО (новое значение):")
             return
 
         if a_mode == "adm_edit_addr_fullname":
             context.user_data.setdefault("adm_buf", {})["full_name"] = raw
             context.user_data["adm_mode"] = "adm_edit_addr_phone"
-            await update.message.reply_text("Телефон:")
+            await reply_animated(update, context, "Телефон:")
             return
 
         if a_mode == "adm_edit_addr_phone":
             context.user_data["adm_buf"]["phone"] = raw
             context.user_data["adm_mode"] = "adm_edit_addr_city"
-            await update.message.reply_text("Город:")
+            await reply_animated(update, context, "Город:")
             return
 
         if a_mode == "adm_edit_addr_city":
             context.user_data["adm_buf"]["city"] = raw
             context.user_data["adm_mode"] = "adm_edit_addr_address"
-            await update.message.reply_text("Адрес:")
+            await reply_animated(update, context, "Адрес:")
             return
 
         if a_mode == "adm_edit_addr_address":
             context.user_data["adm_buf"]["address"] = raw
             context.user_data["adm_mode"] = "adm_edit_addr_postcode"
-            await update.message.reply_text("Почтовый индекс:")
+            await reply_animated(update, context, "Почтовый индекс:")
             return
 
         if a_mode == "adm_edit_addr_postcode":
@@ -445,9 +532,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     address=buf.get("address",""),
                     postcode=raw,
                 )
-                await update.message.reply_text("Адрес обновлён ✅")
+                await reply_animated(update, context, "✅ Адрес обновлён")
             except Exception as e:
-                await update.message.reply_text(f"Ошибка: {e}")
+                await reply_animated(update, context, f"Ошибка: {e}")
             finally:
                 context.user_data.pop("adm_mode", None)
                 context.user_data.pop("adm_buf", None)
@@ -457,11 +544,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if a_mode == "adm_export_orders_by_note":
             marker = raw.strip()
             if not marker:
-                await update.message.reply_text("Пришли метку/слово для поиска в note.")
+                await reply_animated(update, context, "Пришли метку/слово для поиска в note.")
                 return
-            orders = sheets.get_orders_by_note(marker)  # реализуй в sheets: фильтр по подстроке в note
+            orders = sheets.get_orders_by_note(marker)
             if not orders:
-                await update.message.reply_text("Ничего не найдено.")
+                await reply_animated(update, context, "Ничего не найдено.")
             else:
                 lines = []
                 for o in orders:
@@ -476,27 +563,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"*updated_at:* {o.get('updated_at','')}\n"
                         "—"
                     )
-                await update.message.reply_markdown("\n".join(lines))
+                await reply_markdown_animated(update, context, "\n".join(lines))
             context.user_data.pop("adm_mode", None)
             return
 
     # ===== USER FLOW =====
-    if text in {"отмена", "cancel"}:
+    if _is(text, CLIENT_ALIASES["cancel"]):
         context.user_data["mode"] = None
-        await update.message.reply_text("Ок, отменил. Что дальше?", reply_markup=MAIN_KB)
+        await reply_animated(update, context, "Отменили действие. Что дальше? 🙂", reply_markup=MAIN_KB)
         return
 
-    if text == "отследить разбор":
+    if _is(text, CLIENT_ALIASES["track"]):
         context.user_data["mode"] = "track"
-        await update.message.reply_text("Отправьте номер заказа (например: CN-12345):")
+        await reply_animated(update, context, "🔎 Отправьте номер заказа (например: CN-12345):")
         return
 
-    if text == "мои адреса":
+    if _is(text, CLIENT_ALIASES["addrs"]):
         context.user_data["mode"] = None
         await show_addresses(update, context)
         return
 
-    if text == "мои подписки":
+    if _is(text, CLIENT_ALIASES["subs"]):
         context.user_data["mode"] = None
         await show_subscriptions(update, context)
         return
@@ -509,7 +596,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ====== Мастер адреса (как раньше) ======
     if mode == "add_address_fullname":
         context.user_data["full_name"] = raw
-        await update.message.reply_text("Телефон (пример: 87001234567):")
+        await reply_animated(update, context, "📞 Телефон (пример: 87001234567):")
         context.user_data["mode"] = "add_address_phone"
         return
 
@@ -518,50 +605,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if normalized.startswith("+7"): normalized = "8" + normalized[2:]
         elif normalized.startswith("7"): normalized = "8" + normalized[1:]
         if not (normalized.isdigit() and len(normalized) == 11 and normalized.startswith("8")):
-            await update.message.reply_text("Нужно 11 цифр и обязательно с 8. Пример: 87001234567\nВведи номер ещё раз или нажми «Отмена».")
+            await reply_animated(update, context, "Нужно 11 цифр и обязательно с 8. Пример: 87001234567\nВведи номер ещё раз или нажми «Отмена».")
             return
         context.user_data["phone"] = normalized
-        await update.message.reply_text("Город (пример: Астана):")
+        await reply_animated(update, context, "🏙 Город (пример: Астана):")
         context.user_data["mode"] = "add_address_city"
         return
 
     if mode == "add_address_city":
         context.user_data["city"] = raw
-        await update.message.reply_text("Адрес (свободный формат):")
+        await reply_animated(update, context, "🏠 Адрес (свободный формат):")
         context.user_data["mode"] = "add_address_address"
         return
 
     if mode == "add_address_address":
         context.user_data["address"] = raw
-        await update.message.reply_text("Почтовый индекс (пример: 010000):")
+        await reply_animated(update, context, "📮 Почтовый индекс (пример: 010000):")
         context.user_data["mode"] = "add_address_postcode"
         return
 
     if mode == "add_address_postcode":
         if not (raw.isdigit() and 5 <= len(raw) <= 6):
-            await update.message.reply_text("Индекс выглядит странно. Пример: 010000\nВведи индекс ещё раз или нажми «Отмена».")
+            await reply_animated(update, context, "Индекс выглядит странно. Пример: 010000\nВведи индекс ещё раз или нажми «Отмена».")
             return
         context.user_data["postcode"] = raw
         await save_address(update, context)
         return
 
     # Ничего не подошло
-    await update.message.reply_text(
-        "Не понял. Нажмите кнопку ниже или введите номер заказа. Для выхода — «Отмена».",
+    await reply_animated(
+        update, context,
+        "Хмм, не понял. Выберите кнопку ниже или введите номер заказа. Если что — «Отмена».",
         reply_markup=MAIN_KB,
     )
 
 # ---------------------- Клиент: статус/подписки/адреса ----------------------
 
 async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    await _typing(context, update.effective_chat.id, 0.5)
     order_id = extract_order_id(order_id) or order_id
     order = sheets.get_order(order_id)
     if not order:
-        await update.message.reply_text("Такой заказ не найден. Проверьте номер или повторите позже.")
+        await reply_animated(update, context, "🙈 Такой заказ не найден. Проверьте номер или повторите позже.")
         return
     status = order.get("status") or "статус не указан"
     origin = order.get("origin") or ""
-    txt = f"Заказ *{order_id}*\nСтатус: *{status}*"
+    txt = f"📦 Заказ *{order_id}*\nСтатус: *{status}*"
     if origin:
         txt += f"\nСтрана/источник: {origin}"
 
@@ -569,27 +658,29 @@ async def query_status(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub:{order_id}")]])
     else:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")]])
-    await update.message.reply_markdown(txt, reply_markup=kb)
+    await reply_markdown_animated(update, context, txt, reply_markup=kb)
     context.user_data["mode"] = None
 
 async def show_addresses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _typing(context, update.effective_chat.id, 0.4)
     addrs = sheets.list_addresses(update.effective_user.id)
     if not addrs:
-        await update.message.reply_text(
-            "У вас пока нет адреса. Хотите добавить?",
+        await reply_animated(
+            update, context,
+            "У вас пока нет адреса. Добавим?",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Добавить адрес", callback_data="addr:add")]]),
         )
         return
     lines = []
     for a in addrs:
-        lines.append(f"• {a['full_name']}, {a['phone']}, {a['city']}, {a['address']}, {a['postcode']}")
+        lines.append(f"• {a['full_name']} — {a['phone']}\n{a['city']}, {a['address']}, {a['postcode']}")
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✏️ Изменить адрес", callback_data="addr:add")],
             [InlineKeyboardButton("🗑 Удалить адрес", callback_data="addr:del")],
         ]
     )
-    await update.message.reply_text("Ваш адрес доставки:\n" + "\n".join(lines), reply_markup=kb)
+    await reply_animated(update, context, "📍 Ваш адрес доставки:\n" + "\n\n".join(lines), reply_markup=kb)
 
 async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -613,27 +704,28 @@ async def save_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["mode"] = None
     msg = (
-        "Адрес сохранён ✅\n\n"
-        f"ФИО: {context.user_data.get('full_name','')}\n"
-        f"Телефон: {context.user_data.get('phone','')}\n"
-        f"Город: {context.user_data.get('city','')}\n"
-        f"Адрес: {context.user_data.get('address','')}\n"
-        f"Индекс: {context.user_data.get('postcode','')}"
+        "✅ Адрес сохранён!\n\n"
+        f"👤 ФИО: {context.user_data.get('full_name','')}\n"
+        f"📞 Телефон: {context.user_data.get('phone','')}\n"
+        f"🏙 Город: {context.user_data.get('city','')}\n"
+        f"🏠 Адрес: {context.user_data.get('address','')}\n"
+        f"📮 Индекс: {context.user_data.get('postcode','')}"
     )
-    await update.message.reply_text(msg, reply_markup=MAIN_KB)
+    await reply_animated(update, context, msg, reply_markup=MAIN_KB)
 
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _typing(context, update.effective_chat.id, 0.4)
     subs = sheets.list_subscriptions(update.effective_user.id)
     if not subs:
-        await update.message.reply_text("Подписок пока нет. Отследите заказ и нажмите «Подписаться».")
+        await reply_animated(update, context, "Пока нет подписок. Отследите заказ и нажмите «Подписаться».")
         return
     txt_lines, kb_rows = [], []
     for s in subs:
         last = s.get("last_sent_status", "—")
         order_id = s["order_id"]
-        txt_lines.append(f"• {order_id} (последний статус: {last})")
+        txt_lines.append(f"• {order_id} — последний статус: {last}")
         kb_rows.append([InlineKeyboardButton(f"🗑 Отписаться от {order_id}", callback_data=f"unsub:{order_id}")])
-    await update.message.reply_text("Ваши подписки:\n" + "\n".join(txt_lines), reply_markup=InlineKeyboardMarkup(kb_rows))
+    await reply_animated(update, context, "🔔 Ваши подписки:\n" + "\n".join(txt_lines), reply_markup=InlineKeyboardMarkup(kb_rows))
 
 # ---------- Уведомления подписчикам ----------
 
@@ -653,7 +745,7 @@ async def notify_subscribers(application, order_id: str, new_status: str):
         try:
             await application.bot.send_message(
                 chat_id=uid,
-                text=f"Обновление по заказу *{order_id}*\nНовый статус: *{new_status}*",
+                text=f"🔄 Обновление по заказу *{order_id}*\nНовый статус: *{new_status}*",
                 parse_mode="Markdown",
             )
             try: sheets.set_last_sent_status(uid, order_id, new_status)
@@ -683,9 +775,9 @@ async def remind_unpaid_for_order(application, order_id: str) -> bool:
             await application.bot.send_message(
                 chat_id=int(uid),
                 text=(
-                    f"Заказ *{order_id}*\n"
+                    f"⏰ Напоминание по заказу *{order_id}*\n"
                     f"Статус: *Доставка не оплачена*\n\n"
-                    f"Пожалуйста, оплатите доставку. Если уже оплатили — проигнорируйте."
+                    f"Пожалуйста, оплатите доставку. Если уже оплатили — можно игнорировать."
                 ),
                 parse_mode="Markdown",
             )
@@ -697,13 +789,13 @@ async def remind_unpaid_for_order(application, order_id: str) -> bool:
 async def report_unpaid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grouped = sheets.get_all_unpaid_grouped()
     if not grouped:
-        await update.message.reply_text("Должников не найдено — красота!")
+        await reply_animated(update, context, "🎉 Должников не найдено — красота!")
         return
     lines = ["📋 Отчёт по должникам:"]
     for oid, users in grouped.items():
         ulist = ", ".join([f"@{u}" for u in users])
         lines.append(f"• {oid}: {ulist if ulist else '—'}")
-    await update.message.reply_text("\n".join(lines))
+    await reply_animated(update, context, "\n".join(lines))
 
 async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grouped = sheets.get_all_unpaid_grouped()
@@ -716,7 +808,7 @@ async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAUL
         ok = 0; fail = 0
         for uid in user_ids:
             try:
-                await context.bot.send_message(chat_id=uid, text=f"Напоминание: неоплаченный разбор {order_id}. Пожалуйста, оплатите.")
+                await context.bot.send_message(chat_id=uid, text=f"💳 Напоминание: неоплаченный разбор {order_id}. Пожалуйста, оплатите.")
                 ok += 1
             except Exception:
                 fail += 1
@@ -730,7 +822,7 @@ async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAUL
         "",
         *report_lines,
     ])
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=summary)
+    await reply_animated(update, context, summary)
 
 # ---------- CallbackQuery ----------
 
@@ -742,12 +834,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # адреса (клиент)
     if data == "addr:add":
         context.user_data["mode"] = "add_address_fullname"
-        await q.message.reply_text("Давайте добавим/обновим адрес.\nФИО:")
+        await reply_animated(update, context, "Давайте добавим/обновим адрес.\n👤 ФИО:")
         return
 
     if data == "addr:del":
         ok = sheets.delete_address(update.effective_user.id)
-        await q.message.reply_text("Адрес удалён ✅" if ok else "Удалять нечего — адрес не найден.")
+        await reply_animated(update, context, "Адрес удалён ✅" if ok else "Удалять нечего — адрес не найден.")
         return
 
     # смена статуса из карточки заказа
@@ -755,7 +847,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_admin(update.effective_user.id): return
         order_id = data.split(":", 2)[2]
         rows = [[InlineKeyboardButton(s, callback_data=f"adm:set_status_val:{order_id}:{i}")] for i, s in enumerate(STATUSES)]
-        await q.message.reply_text("Выберите новый статус:", reply_markup=InlineKeyboardMarkup(rows))
+        await reply_animated(update, context, "Выберите новый статус:", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data.startswith("adm:set_status_val:"):
@@ -764,14 +856,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             idx = int(idx_s); new_status = STATUSES[idx]
         except Exception:
-            await q.message.reply_text("Некорректный выбор статуса.")
+            await reply_animated(update, context, "Некорректный выбор статуса.")
             return
         ok = sheets.update_order_status(order_id, new_status)
         if ok:
-            await q.message.reply_text(f"Статус *{order_id}* обновлён на: _{new_status}_ ✅", parse_mode="Markdown")
+            await reply_markdown_animated(update, context, f"✨ Статус *{order_id}* обновлён на: _{new_status}_ ✅")
             await notify_subscribers(context.application, order_id, new_status)
         else:
-            await q.message.reply_text("Заказ не найден.")
+            await reply_animated(update, context, "Заказ не найден.")
         return
 
     # подписка/отписка (клиент)
@@ -782,13 +874,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_reply_markup(InlineKeyboardMarkup([[InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub:{order_id}")]]))
         except Exception:
             pass
-        await q.message.reply_text("Готово! Буду присылать обновления по этому заказу 🔔")
+        await reply_animated(update, context, "Готово! Буду присылать обновления по этому заказу 🔔")
         return
 
     if data.startswith("unsub:"):
         order_id = data.split(":", 1)[1]
         sheets.unsubscribe(update.effective_user.id, order_id)
-        await q.message.reply_text("Отписка выполнена.")
+        await reply_animated(update, context, "Отписка выполнена.")
         try:
             await q.edit_message_reply_markup(InlineKeyboardMarkup([[InlineKeyboardButton("🔔 Подписаться на обновления", callback_data=f"sub:{order_id}")]]))
         except Exception:
@@ -806,7 +898,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await q.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
         except Exception:
-            await q.message.reply_markdown(txt, reply_markup=kb)
+            await reply_markdown_animated(update, context, txt, reply_markup=kb)
         return
 
     if data.startswith("pp:refresh:"):
