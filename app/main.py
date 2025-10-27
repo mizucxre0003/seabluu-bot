@@ -44,16 +44,26 @@ STATUSES = [
 
 UNPAID_STATUS = "доставка не оплачена"
 
-ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—]?\s?(\d{3,})", re.IGNORECASE)
+ORDER_ID_RE = re.compile(r"([A-ZА-Я]{1,3})[ \-–—_]*([A-Z0-9]{2,})", re.IGNORECASE)
 USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{5,})")
 
 def extract_order_id(s: str) -> str | None:
     if not s:
         return None
-    m = ORDER_ID_RE.search(s.strip())
-    if not m:
-        return None
-    return f"{m.group(1).upper()}-{m.group(2)}"
+    s = s.strip()
+    m = ORDER_ID_RE.search(s)
+    if m:
+        return f"{m.group(1).upper()}-{m.group(2).upper()}"
+    # fallback: если уже похоже на PREFIX-SUFFIX, нормализуем
+    if "-" in s:
+        left, right = s.split("-", 1)
+        left, right = left.strip(), right.strip()
+        if left and right and left.isalpha():
+            import re as _re
+            right_norm = _re.sub(r"[^A-Z0-9]+", "", right, flags=_re.I)
+            if right_norm:
+                return f"{left.upper()}-{right_norm.upper()}"
+    return None
 
 def is_valid_status(s: str, statuses: list[str]) -> bool:
     return bool(s) and s.strip().lower() in {x.lower() for x in statuses}
@@ -469,7 +479,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Массовая смена статусов: админ присылает список order_id
         if a_mode == "mass_update_status_ids":
             # распарсим произвольный список ID
-            raw_ids = re.split(r"[^\w\-]+", raw, flags=re.UNICODE)
+            raw_ids = re.split(r"[,\s]+", raw.strip())
             ids = []
             seen = set()
             for token in raw_ids:
