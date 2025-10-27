@@ -156,6 +156,48 @@ def get_orders_by_note(marker: str) -> List[Dict[str, Any]]:
     subset = df[df["note"].astype(str).str.lower().str.contains(m, na=False)]
     return subset.to_dict(orient="records")
 
+def _parse_dt(s: str):
+    from datetime import datetime
+    try:
+        # ожидаем ISO-строку вида 2025-10-27T12:34:56
+        return datetime.fromisoformat(str(s))
+    except Exception:
+        return None
+
+def list_recent_orders(limit: int = 20) -> list[dict]:
+    """Последние обновлённые заказы по updated_at (desc)."""
+    ws = get_worksheet("orders")
+    values = ws.get_all_records()
+    if not values:
+        return []
+    df = pd.DataFrame(values)
+    df = _ensure_orders_cols(df)
+    # приведём даты и отсортируем
+    df["__dt"] = df["updated_at"].apply(_parse_dt)
+    df = df.sort_values(by="__dt", ascending=False, na_position="last")
+    res = df.drop(columns=["__dt"]).head(limit).to_dict(orient="records")
+    return res
+
+def list_orders_by_status(statuses) -> list[dict]:
+    """
+    Вернёт заказы по статусу/статусам (без учёта регистра).
+    statuses: str | list[str]
+    """
+    if isinstance(statuses, str):
+        statuses = [statuses]
+    wanted = {str(s).strip().lower() for s in (statuses or []) if str(s).strip()}
+    if not wanted:
+        return []
+
+    ws = get_worksheet("orders")
+    values = ws.get_all_records()
+    if not values:
+        return []
+    df = pd.DataFrame(values)
+    df = _ensure_orders_cols(df)
+    mask = df["status"].astype(str).str.lower().isin(wanted)
+    return df[mask].to_dict(orient="records")
+
 # -------------------------------------------------
 #  ADDRESSES
 # -------------------------------------------------
