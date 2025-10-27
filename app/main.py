@@ -28,8 +28,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------- Константы и утилиты ----------------------
 
-# ---------------------- Константы и утилиты ----------------------
-
 STATUSES = [
     "🛒 выкуплен",
     "📦 отправка на адрес (Корея)",
@@ -103,6 +101,7 @@ BTN_ADMIN_TRACK_NEW   = "🔎 Отследить разбор"
 BTN_ADMIN_SEND_NEW    = "📣 Админ: Рассылка"
 BTN_ADMIN_ADDRS_NEW   = "📇 Админ: Адреса"
 BTN_ADMIN_REPORTS_NEW = "📊 Отчёты"
+BTN_ADMIN_MASS_NEW    = "🧰 Массовая смена статусов"
 BTN_ADMIN_EXIT_NEW    = "🚪 Выйти из админ-панели"
 
 BTN_BACK_TO_ADMIN_NEW = "⬅️ Назад, в админ-панель"
@@ -113,6 +112,7 @@ ADMIN_MENU_ALIASES = {
     "admin_send": {BTN_ADMIN_SEND_NEW, "админ: рассылка"},
     "admin_addrs": {BTN_ADMIN_ADDRS_NEW, "админ: адреса"},
     "admin_reports": {BTN_ADMIN_REPORTS_NEW, "отчёты"},
+    "admin_mass": {BTN_ADMIN_MASS_NEW, "массовая смена статусов"},
     "admin_exit": {BTN_ADMIN_EXIT_NEW, "выйти из админ-панели"},
     "back_admin": {BTN_BACK_TO_ADMIN_NEW, "назад, в админ-панель"},
 }
@@ -158,11 +158,13 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# Перестроил админ-меню: «Отчёты» + «Массовая смена» в одной строке, выход — отдельной
 ADMIN_MENU_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton(BTN_ADMIN_ADD_NEW),  KeyboardButton(BTN_ADMIN_TRACK_NEW)],
         [KeyboardButton(BTN_ADMIN_SEND_NEW), KeyboardButton(BTN_ADMIN_ADDRS_NEW)],
-        [KeyboardButton(BTN_ADMIN_REPORTS_NEW), KeyboardButton(BTN_ADMIN_EXIT_NEW)],
+        [KeyboardButton(BTN_ADMIN_REPORTS_NEW), KeyboardButton(BTN_ADMIN_MASS_NEW)],
+        [KeyboardButton(BTN_ADMIN_EXIT_NEW)],
     ],
     resize_keyboard=True,
 )
@@ -198,6 +200,17 @@ def status_keyboard(cols: int = 2) -> InlineKeyboardMarkup:
     rows, row = [], []
     for i, s in enumerate(STATUSES):
         row.append(InlineKeyboardButton(s, callback_data=f"adm:pick_status_id:{i}"))
+        if len(row) == cols:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+# Универсальная клавиатура выбора статуса с произвольным префиксом (для массового режима)
+def status_keyboard_with_prefix(prefix: str, cols: int = 2) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for i, s in enumerate(STATUSES):
+        row.append(InlineKeyboardButton(s, callback_data=f"{prefix}:{i}"))
         if len(row) == cols:
             rows.append(row); row = []
     if row:
@@ -302,6 +315,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if _is(text, ADMIN_MENU_ALIASES["admin_addrs"]):
             await reply_animated(update, context, "📇 Раздел «Адреса»", reply_markup=ADMIN_ADDR_MENU_KB)
+            return
+
+        if _is(text, ADMIN_MENU_ALIASES["admin_mass"]):
+            # шаг 1: выбрать целевой статус из инлайн-клавиатуры
+            context.user_data["adm_mode"] = "mass_pick_status"
+            await reply_animated(
+                update, context,
+                "Выбери новый статус для нескольких заказов:",
+                reply_markup=status_keyboard_with_prefix("mass:pick_status_id")
+            )
             return
 
         if _is(text, ADMIN_MENU_ALIASES["back_admin"]):
@@ -441,6 +464,65 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await reply_markdown_animated(update, context, part_text, reply_markup=kb)
 
             context.user_data.pop("adm_mode", None)
+            return
+
+        # Массовая смена статусов: админ присылает список order_id
+        if a_mode == "mass_update_status_ids":
+            # распарсим произвольный список ID
+            raw_ids = re.split(r"[^\w\-]+", raw, flags=re.UNICODE)
+            ids = []
+            seen = set()
+            for token in raw_ids:
+                oid = extract_order_id(token)
+                if oid and oid not in seen:
+                    seen.add(oid)
+                    ids.append(oid)
+
+            if not ids:
+                await reply_animated(update, context, "Не нашёл order_id. Пришли ещё раз (пример: CN-1001 KR-2002).")
+                return
+
+            new_status = context.user_data.get("mass_status")
+            if not new_status:
+                await reply_animated(update, context, "Не выбран новый статус. Повтори с начала: «🧰 Массовая смена статусов».")
+                context.user_data.pop("adm_mode", None)
+                return
+
+            ok, fail = 0, 0
+            failed_ids = []
+            for oid in ids:
+                try:
+                    updated = sheets.update_order_status(oid, new_status)
+                    if updated:
+                        ok += 1
+                        # уведомим подписчиков конкретного заказа
+                        try:
+                            await notify_subscribers(context.application, oid, new_status)
+                        except Exception:
+                            pass
+                    else:
+                        fail += 1
+                        failed_ids.append(oid)
+                except Exception:
+                    fail += 1
+                    failed_ids.append(oid)
+
+            # очистим режим
+            context.user_data.pop("adm_mode", None)
+            context.user_data.pop("mass_status", None)
+
+            # отчёт
+            parts = [
+                "🧰 Массовая смена статусов — итог",
+                f"Всего заказов: {len(ids)}",
+                f"✅ Успешно: {ok}",
+                f"❌ Ошибки: {fail}",
+            ]
+            if failed_ids:
+                parts.append("")
+                parts.append("Не удалось обновить:")
+                parts.append(", ".join(failed_ids))
+            await reply_animated(update, context, "\n".join(parts))
             return
 
         # Ручная рассылка по одному order_id
@@ -864,6 +946,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_subscribers(context.application, order_id, new_status)
         else:
             await reply_animated(update, context, "Заказ не найден.")
+        return
+
+    # массовая смена статусов: выбор статуса (шаг 1)
+    if data.startswith("mass:pick_status_id:"):
+        if not _is_admin(update.effective_user.id):
+            return
+        _, _, idx_s = data.split(":")
+        try:
+            idx = int(idx_s)
+            new_status = STATUSES[idx]
+        except Exception:
+            await reply_animated(update, context, "Некорректный выбор статуса.")
+            return
+        # запомним и попросим список заказов
+        context.user_data["adm_mode"] = "mass_update_status_ids"
+        context.user_data["mass_status"] = new_status
+        await reply_markdown_animated(
+            update, context,
+            "Ок! Новый статус: *{0}*\n\nТеперь пришли список `order_id`:\n"
+            "• через пробел, запятые или с новой строки\n"
+            "• пример: `CN-1001 CN-1002, KR-2003`".format(new_status)
+        )
         return
 
     # подписка/отписка (клиент)
