@@ -609,7 +609,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # если заказ есть — шлём рассылку и показываем подробный отчёт
             ok, report = await remind_unpaid_for_order(context.application, parsed_id)
-            await reply_markdown_animated(update, context, report)
+            await reply_animated(update, context, report)
 
             # выходим из шага, но остаёмся в админ-панели
             context.user_data.pop("adm_mode", None)
@@ -941,7 +941,7 @@ async def remind_unpaid_for_order(application, order_id: str) -> tuple[bool, str
     if not usernames:
         return False, f"🎉 По заказу *{order_id}* должников нет — красота!"
 
-    lines = [f"📩 *Уведомления по ID разбора* — *{order_id}*"]
+    lines = [f"📩 Уведомления по ID разбора — {order_id}"]
     ok_cnt, fail_cnt = 0, 0
 
     for uname in usernames:
@@ -1012,7 +1012,7 @@ async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAUL
     for order_id, usernames in grouped.items():
         order_ok = 0
         order_fail = 0
-        lines = [f"*{order_id}:*"]
+        lines = [f"{order_id}:"]
 
         # обрабатываем по username, чтобы красиво показать, кому именно ушло/не ушло
         for uname in usernames:
@@ -1055,14 +1055,14 @@ async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAUL
         blocks.append("\n".join(lines))
 
     summary = "\n".join([
-        "📣 *Уведомления всем должникам — итог*",
-        f"Разборов: {total_orders}",
-        f"✅ Успешно: {total_ok}",
-        f"❌ Ошибок: {total_fail}",
-        "",
-        *blocks,
-    ])
-    await reply_markdown_animated(update, context, summary)
+    "📣 Уведомления всем должникам — итог",
+    f"Разборов: {total_orders}",
+    f"✅ Успешно: {total_ok}",
+    f"❌ Ошибок: {total_fail}",
+    "",
+    *blocks,
+])
+    await reply_animated(update, context, summary)
 
 # ---------- CallbackQuery ----------
 
