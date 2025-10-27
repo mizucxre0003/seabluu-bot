@@ -595,12 +595,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Ручная рассылка по одному order_id
-if a_mode == "adm_remind_unpaid_order":
-    parsed_id = extract_order_id(raw) or raw
-    ok, report = await remind_unpaid_for_order(context.application, parsed_id)
-    await reply_markdown_animated(update, context, report)
-    context.user_data.pop("adm_mode", None)
-    return
+        if a_mode == "adm_remind_unpaid_order":
+            parsed_id = extract_order_id(raw) or raw
+
+            # если такого заказа нет — остаёмся в этом же шаге и просим ввести корректный
+            order = sheets.get_order(parsed_id)
+            if not order:
+                await reply_animated(
+                    update, context,
+                    "🙈 Заказ не найден. Введи корректный *order_id* (например: CN-12345):"
+                )
+                return  # НЕ выходим из админки и шага
+
+            # если заказ есть — шлём рассылку и показываем подробный отчёт
+            ok, report = await remind_unpaid_for_order(context.application, parsed_id)
+            await reply_markdown_animated(update, context, report)
+
+            # выходим из шага, но остаёмся в админ-панели
+            context.user_data.pop("adm_mode", None)
+            return
 
         # Выгрузить адреса (по списку username)
         if a_mode == "adm_export_addrs":
