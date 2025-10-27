@@ -308,6 +308,20 @@ def _admin_mode_prompt(mode: str):
                 "например: CN-1001 CN-1002, KR-2003"), None
     # по умолчанию — просто покажем админ-меню
     return "Вы в админ-панели. Выберите действие:", ADMIN_MENU_KB
+    # Короткая причина ошибки отправки
+def _err_reason(e: Exception) -> str:
+    s = str(e).lower()
+    if "forbidden" in s or "blocked" in s:
+        return "бот заблокирован"
+    if "chat not found" in s or "not found" in s:
+        return "нет chat_id"
+    if "bad request" in s:
+        return "bad request"
+    if "retry after" in s or "flood" in s:
+        return "rate limit"
+    if "timeout" in s:
+        return "timeout"
+    return "ошибка"
 
 # ---------------------- Команды ----------------------
 
@@ -581,15 +595,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Ручная рассылка по одному order_id
-        if a_mode == "adm_remind_unpaid_order":
-            parsed_id = extract_order_id(raw) or raw
-            ok = await remind_unpaid_for_order(context.application, parsed_id)
-            await reply_markdown_animated(
-                update, context,
-                f"📨 Рассылка по заказу *{parsed_id}* отправлена ✅" if ok else "Либо заказ не найден, либо нет получателей."
-            )
-            context.user_data.pop("adm_mode", None)
-            return
+if a_mode == "adm_remind_unpaid_order":
+    parsed_id = extract_order_id(raw) or raw
+    ok, report = await remind_unpaid_for_order(context.application, parsed_id)
+    await reply_markdown_animated(update, context, report)
+    context.user_data.pop("adm_mode", None)
+    return
 
         # Выгрузить адреса (по списку username)
         if a_mode == "adm_export_addrs":
@@ -904,36 +915,60 @@ async def notify_subscribers(application, order_id: str, new_status: str):
 
 # ---------- Напоминания об оплате ----------
 
-async def remind_unpaid_for_order(application, order_id: str) -> bool:
+async def remind_unpaid_for_order(application, order_id: str) -> tuple[bool, str]:
+    """
+    Шлёт напоминание неплательщикам ТОЛЬКО по указанному order_id
+    и возвращает (было_ли_кому_слать, подробный_отчёт_в_markdown).
+    """
     order = sheets.get_order(order_id)
     if not order:
-        return False
-    unpaid_usernames = sheets.get_unpaid_usernames(order_id)
-    if not unpaid_usernames:
-        return False
-    user_ids = sheets.get_user_ids_by_usernames(unpaid_usernames)
-    if not user_ids:
-        return False
-    sent = 0
-    for uid in user_ids:
+        return False, "🙈 Заказ не найден."
+
+    usernames = sheets.get_unpaid_usernames(order_id)  # список username без @
+    if not usernames:
+        return False, f"🎉 По заказу *{order_id}* должников нет — красота!"
+
+    lines = [f"📩 *Уведомления по ID разбора* — *{order_id}*"]
+    ok_cnt, fail_cnt = 0, 0
+
+    for uname in usernames:
+        ids = []
         try:
-            sheets.subscribe(uid, order_id)
+            ids = sheets.get_user_ids_by_usernames([uname])  # [uid] или []
         except Exception:
             pass
+
+        if not ids:
+            fail_cnt += 1
+            lines.append(f"• ❌ @{uname} — нет chat_id")
+            continue
+
+        uid = ids[0]
         try:
+            # на всякий случай подпишем, чтобы получил будущие статусы
+            try:
+                sheets.subscribe(uid, order_id)
+            except Exception:
+                pass
+
             await application.bot.send_message(
-                chat_id=int(uid),
+                chat_id=uid,
                 text=(
-                    f"⏰ Напоминание по заказу *{order_id}*\n"
+                    f"💳 Напоминание по разбору *{order_id}*\n"
                     f"Статус: *Доставка не оплачена*\n\n"
                     f"Пожалуйста, оплатите доставку. Если уже оплатили — можно игнорировать."
                 ),
                 parse_mode="Markdown",
             )
-            sent += 1
+            ok_cnt += 1
+            lines.append(f"• ✅ @{uname}")
         except Exception as e:
-            logger.warning(f"payment reminder fail to {uid}: {e}")
-    return sent > 0
+            fail_cnt += 1
+            lines.append(f"• ❌ @{uname} — {_err_reason(e)}")
+
+    lines.append("")
+    lines.append(f"_Итого:_ ✅ {ok_cnt}  ❌ {fail_cnt}")
+    return True, "\n".join(lines)
 
 async def report_unpaid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grouped = sheets.get_all_unpaid_grouped()
@@ -947,31 +982,74 @@ async def report_unpaid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_animated(update, context, "\n".join(lines))
 
 async def broadcast_all_unpaid_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    grouped = sheets.get_all_unpaid_grouped()
+    """
+    Шлёт напоминания всем должникам по всем разборам и формирует подробный отчёт:
+    для каждого order_id — список пользователей с ✅/❌ и краткой причиной.
+    """
+    grouped = sheets.get_all_unpaid_grouped()  # {order_id: [username, ...]}
+    if not grouped:
+        await reply_animated(update, context, "🎉 Должников не найдено — красота!")
+        return
+
     total_orders = len(grouped)
     total_ok = 0
     total_fail = 0
-    report_lines: List[str] = []
-    for order_id, users in grouped.items():
-        user_ids = sheets.get_user_ids_by_usernames(users)
-        ok = 0; fail = 0
-        for uid in user_ids:
+    blocks: list[str] = []
+
+    for order_id, usernames in grouped.items():
+        order_ok = 0
+        order_fail = 0
+        lines = [f"*{order_id}:*"]
+
+        # обрабатываем по username, чтобы красиво показать, кому именно ушло/не ушло
+        for uname in usernames:
             try:
-                await context.bot.send_message(chat_id=uid, text=f"💳 Напоминание: неоплаченный разбор {order_id}. Пожалуйста, оплатите.")
-                ok += 1
-            except Exception:
-                fail += 1
-        total_ok += ok; total_fail += fail
-        report_lines.append(f"{order_id}: ✅ {ok} ❌ {fail}")
+                ids = sheets.get_user_ids_by_usernames([uname])  # [uid] или []
+                if not ids:
+                    order_fail += 1
+                    lines.append(f"• ❌ @{uname} — нет chat_id")
+                    continue
+
+                uid = ids[0]
+                try:
+                    # подписываем на обновления заказа, чтобы дальше человек получал статусы
+                    try:
+                        sheets.subscribe(uid, order_id)
+                    except Exception:
+                        pass
+
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=(
+                            f"💳 Напоминание по разбору *{order_id}*\n"
+                            f"Статус: *Доставка не оплачена*\n\n"
+                            f"Пожалуйста, оплатите доставку. Если уже оплатили — можно игнорировать."
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    order_ok += 1
+                    lines.append(f"• ✅ @{uname}")
+                except Exception as e:
+                    order_fail += 1
+                    lines.append(f"• ❌ @{uname} — {_err_reason(e)}")
+            except Exception as e:
+                order_fail += 1
+                lines.append(f"• ❌ @{uname} — {_err_reason(e)}")
+
+        total_ok += order_ok
+        total_fail += order_fail
+        lines.append(f"_Итого по разбору:_ ✅ {order_ok}  ❌ {order_fail}")
+        blocks.append("\n".join(lines))
+
     summary = "\n".join([
-        "📣 Уведомления всем должникам — итог",
+        "📣 *Уведомления всем должникам — итог*",
         f"Разборов: {total_orders}",
-        f"Успешно: {total_ok}",
-        f"Ошибок: {total_fail}",
+        f"✅ Успешно: {total_ok}",
+        f"❌ Ошибок: {total_fail}",
         "",
-        *report_lines,
+        *blocks,
     ])
-    await reply_animated(update, context, summary)
+    await reply_markdown_animated(update, context, summary)
 
 # ---------- CallbackQuery ----------
 
